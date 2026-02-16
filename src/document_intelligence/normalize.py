@@ -124,9 +124,11 @@ def _render_html(normalized: Dict[str, Any]) -> str:
         return bool(value_like_re.match(text.strip()))
 
     def _span_start(spans: list[dict]) -> int | None:
-        starts = [s.get("offset") for s in spans if isinstance(s.get("offset"), int)]
+        starts: list[Any] = [s.get("offset") for s in spans if isinstance(s.get("offset"), int)]
+
         if not starts:
             return None
+
         return min(starts)
 
     def _span_end(spans: list[dict]) -> int | None:

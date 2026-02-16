@@ -1,7 +1,11 @@
 import json
 from pathlib import Path
 from typing import Any, Dict, Literal, Tuple
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from urllib.parse import urlparse
+
+from azure.core.exceptions import HttpResponseError
 
 from .normalize import to_html_payload, to_normalized_json, to_raw_json
 from .service import DocumentIntelligenceService
@@ -37,6 +41,18 @@ def _detect_kind(src: str) -> Tuple[str, str]:
     if _is_url(src):
         return "url", Path(urlparse(src).path).suffix.lower()
     return "file", Path(src).suffix.lower()
+
+
+def _load_url_bytes(url: str) -> bytes:
+    req = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; document-reader/1.0)",
+            "Accept": "*/*",
+        },
+    )
+    with urlopen(req, timeout=60) as resp:
+        return resp.read()
 
 
 def _tiny_markdown_to_html(md_text: str) -> str:
@@ -112,7 +128,21 @@ def analyze_any(
     kind, ext = _detect_kind(src)
 
     if kind == "url":
-        result = service.analyze_url(url=src, model_id=model_id)
+        try:
+            result = service.analyze_url(url=src, model_id=model_id)
+        except HttpResponseError as exc:
+            message = (exc.message or "").lower()
+            # DI sometimes cannot fetch externally accessible URLs due to source-side restrictions.
+            if exc.status_code == 400 and "could not download the file" in message:
+                try:
+                    data = _load_url_bytes(src)
+                except (HTTPError, URLError, TimeoutError) as fetch_exc:
+                    raise ValueError(
+                        f"Failed to download URL locally: {fetch_exc}"
+                    ) from fetch_exc
+                result = service.analyze_bytes(data=data, model_id=model_id)
+            else:
+                raise
         return _serialize(result, output_mode)
 
     path = Path(src)
