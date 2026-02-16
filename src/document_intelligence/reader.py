@@ -1,0 +1,141 @@
+import json
+from pathlib import Path
+from typing import Any, Dict, Literal, Tuple
+from urllib.parse import urlparse
+
+from .normalize import to_html_payload, to_normalized_json, to_raw_json
+from .service import DocumentIntelligenceService
+
+OutputMode = Literal["raw", "normalized", "html"]
+
+SUPPORTED_DIRECT = {
+    ".pdf",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".tif",
+    ".tiff",
+    ".heif",
+    ".bmp",
+    ".docx",
+    ".pptx",
+    ".xlsx",
+    ".html",
+    ".htm",
+}
+
+
+def _is_url(value: str) -> bool:
+    try:
+        parsed = urlparse(value)
+        return parsed.scheme in ("http", "https")
+    except Exception:
+        return False
+
+
+def _detect_kind(src: str) -> Tuple[str, str]:
+    if _is_url(src):
+        return "url", Path(urlparse(src).path).suffix.lower()
+    return "file", Path(src).suffix.lower()
+
+
+def _tiny_markdown_to_html(md_text: str) -> str:
+    lines = md_text.splitlines()
+    html_lines = []
+    in_code = False
+    in_list = False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            if in_list:
+                html_lines.append("</ul>")
+                in_list = False
+            in_code = not in_code
+            html_lines.append("<pre><code>" if in_code else "</code></pre>")
+            continue
+
+        if in_code:
+            escaped = (
+                line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            )
+            html_lines.append(escaped)
+            continue
+
+        if line.startswith("#"):
+            if in_list:
+                html_lines.append("</ul>")
+                in_list = False
+            level = min(6, len(line) - len(line.lstrip("#")))
+            html_lines.append(f"<h{level}>{line[level:].strip()}</h{level}>")
+            continue
+
+        if stripped.startswith("- ") or stripped.startswith("* "):
+            if not in_list:
+                html_lines.append("<ul>")
+                in_list = True
+            html_lines.append(f"<li>{stripped[2:].strip()}</li>")
+            continue
+
+        if in_list:
+            html_lines.append("</ul>")
+            in_list = False
+
+        if stripped == "":
+            html_lines.append("<br/>")
+        else:
+            html_lines.append(f"<p>{line}</p>")
+
+    if in_list:
+        html_lines.append("</ul>")
+
+    body = "\n".join(html_lines)
+    return (
+        "<!doctype html><html><head><meta charset='utf-8'></head>"
+        f"<body>{body}</body></html>"
+    )
+
+
+def _serialize(result, output_mode: OutputMode) -> Dict | str:
+    if output_mode == "raw":
+        return to_raw_json(result)
+    if output_mode == "html":
+        return to_html_payload(result)
+
+    return to_normalized_json(result)
+
+
+def analyze_any(
+    src: str, model_id: str = "prebuilt-layout", output_mode: OutputMode = "raw"
+) -> Dict | str:
+    service = DocumentIntelligenceService()
+    kind, ext = _detect_kind(src)
+
+    if kind == "url":
+        result = service.analyze_url(url=src, model_id=model_id)
+        return _serialize(result, output_mode)
+
+    path = Path(src)
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+
+    if ext == ".md":
+        html = _tiny_markdown_to_html(path.read_text(encoding="utf-8"))
+        result = service.analyze_bytes(data=html.encode("utf-8"), model_id=model_id)
+        return _serialize(result, output_mode)
+
+    if ext not in SUPPORTED_DIRECT:
+        raise ValueError(
+            f"Unsupported file extension: {ext or '<none>'}. Convert to PDF/HTML first."
+        )
+
+    result = service.analyze_file(path=path, model_id=model_id)
+    return _serialize(result, output_mode)
+
+
+def save_output(payload: Any, out_path: str) -> None:
+    if isinstance(payload, str):
+        Path(out_path).write_text(payload, encoding="utf-8")
+        return
+
+    Path(out_path).write_text(json.dumps(payload, ensure_ascii=False, indent=2))
