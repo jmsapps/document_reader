@@ -31,6 +31,7 @@ def to_normalized_json(result: Any) -> Dict[str, Any]:
         "pages": [],
         "paragraphs": [],
         "tables": [],
+        "sections": [],
         "key_value_pairs": [],
         "figures": [],
     }
@@ -73,6 +74,14 @@ def to_normalized_json(result: Any) -> Dict[str, Any]:
             }
         )
 
+    for section in (getattr(result, "sections", None) or []):
+        output["sections"].append(
+            {
+                "spans": _span_list(section),
+                "elements": list(getattr(section, "elements", None) or []),
+            }
+        )
+
     for kv in (getattr(result, "key_value_pairs", None) or []):
         output["key_value_pairs"].append(
             {
@@ -105,6 +114,7 @@ def to_raw_json(result: Any) -> Dict[str, Any]:
 def _render_html(normalized: Dict[str, Any]) -> str:
     paragraphs = normalized.get("paragraphs", [])
     tables = normalized.get("tables", [])
+    sections = normalized.get("sections", [])
 
     parts = [
         "<!doctype html>",
@@ -185,7 +195,7 @@ def _render_html(normalized: Dict[str, Any]) -> str:
     blocks = []
     para_seq = 0
     table_seq = 0
-    for p in paragraphs:
+    for p_index, p in enumerate(paragraphs):
         text = (p.get("text") or "").strip()
         if not text:
             continue
@@ -199,11 +209,12 @@ def _render_html(normalized: Dict[str, Any]) -> str:
                 "spans": p.get("spans", []),
                 "bounding_regions": p.get("bounding_regions", []),
                 "seq": para_seq,
+                "source_ref": f"/paragraphs/{p_index}",
             }
         )
         para_seq += 1
 
-    for t in tables:
+    for t_index, t in enumerate(tables):
         blocks.append(
             {
                 "type": "table",
@@ -211,18 +222,59 @@ def _render_html(normalized: Dict[str, Any]) -> str:
                 "spans": t.get("spans", []),
                 "bounding_regions": t.get("bounding_regions", []),
                 "seq": table_seq,
+                "source_ref": f"/tables/{t_index}",
             }
         )
         table_seq += 1
 
+    ref_to_section_rank: dict[str, int] = {}
+    if isinstance(sections, list) and sections:
+        visited_sections: set[int] = set()
+        active_sections: set[int] = set()
+        ordered_refs: list[str] = []
+        seen_refs: set[str] = set()
+
+        def _walk_section(section_idx: int) -> None:
+            if section_idx < 0 or section_idx >= len(sections):
+                return
+            if section_idx in active_sections:
+                return
+            if section_idx in visited_sections:
+                return
+
+            active_sections.add(section_idx)
+            section = sections[section_idx] if isinstance(sections[section_idx], dict) else {}
+            for ref in section.get("elements", []):
+                if not isinstance(ref, str):
+                    continue
+                if ref.startswith("/sections/"):
+                    child = ref.rsplit("/", 1)[-1]
+                    if child.isdigit():
+                        _walk_section(int(child))
+                    continue
+                if ref.startswith("/paragraphs/") or ref.startswith("/tables/"):
+                    if ref not in seen_refs:
+                        seen_refs.add(ref)
+                        ordered_refs.append(ref)
+
+            active_sections.remove(section_idx)
+            visited_sections.add(section_idx)
+
+        for idx in range(len(sections)):
+            _walk_section(idx)
+
+        for rank, ref in enumerate(ordered_refs):
+            ref_to_section_rank[ref] = rank
+
     def _block_sort_key(block: dict):
+        section_key = ref_to_section_rank.get(block.get("source_ref", ""), 10**9)
         page_key = _page_hint(block)
         y_key = _y_hint(block)
         start = _span_start(block.get("spans", []))
         span_missing = 1 if start is None else 0
         span_key = start if start is not None else 10**12
-        # Primary order follows page layout (page, top-y), then span as tie-breaker.
-        return (page_key, y_key, span_missing, span_key, block.get("seq", 0))
+        # Prefer section graph order when present, then page layout and span tie-breakers.
+        return (section_key, page_key, y_key, span_missing, span_key, block.get("seq", 0))
 
     blocks.sort(key=_block_sort_key)
 
