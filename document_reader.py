@@ -7,9 +7,9 @@ from azure.core.exceptions import HttpResponseError
 from src.document_intelligence.reader import analyze_any, save_output
 
 
-def _default_output_path(src: str) -> str:
-    folder = "raw"
-    prefix = "raw_"
+def _default_output_path(src: str, content_format: str) -> str:
+    folder = content_format
+    prefix = f"{content_format}_"
     suffix = ".json"
 
     parsed = urlparse(src)
@@ -51,7 +51,7 @@ def main() -> int:
         "--out",
         "-o",
         default=None,
-        help="Output path. If omitted, defaults to data/raw.",
+        help="Output path. If omitted, defaults to data/<content_format>/<content_format>_<input_name>.json.",
     )
     args = parser.parse_args()
 
@@ -72,7 +72,7 @@ def main() -> int:
 
         return 3
 
-    out_path = args.out or _default_output_path(args.src)
+    out_path = args.out or _default_output_path(args.src, args.content_format)
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     save_output(payload, out_path)
 
