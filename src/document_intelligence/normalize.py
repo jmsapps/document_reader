@@ -92,10 +92,14 @@ def to_normalized_json(result: Any) -> Dict[str, Any]:
         )
 
     for figure in (getattr(result, "figures", None) or []):
+        caption = getattr(figure, "caption", None)
         output["figures"].append(
             {
                 "id": figure.id,
-                "caption": getattr(figure, "caption", None),
+                "caption": getattr(caption, "content", None) if caption else None,
+                "caption_spans": _span_list(caption) if caption else [],
+                "spans": _span_list(figure),
+                "bounding_regions": _bounding_regions(figure),
                 "page_number": (
                     figure.bounding_regions[0].page_number
                     if figure.bounding_regions
@@ -114,6 +118,7 @@ def to_raw_json(result: Any) -> Dict[str, Any]:
 def _render_html(normalized: Dict[str, Any]) -> str:
     paragraphs = normalized.get("paragraphs", [])
     tables = normalized.get("tables", [])
+    figures = normalized.get("figures", [])
     sections = normalized.get("sections", [])
 
     parts = [
@@ -160,6 +165,14 @@ def _render_html(normalized: Dict[str, Any]) -> str:
         if start is not None and end is not None:
             table_ranges.append((start, end))
 
+    figure_ranges = []
+    for f in figures:
+        spans = f.get("spans", [])
+        start = _span_start(spans)
+        end = _span_end(spans)
+        if start is not None and end is not None:
+            figure_ranges.append((start, end))
+
     def _in_table_span(spans: list[dict]) -> bool:
         p_start = _span_start(spans)
         p_end = _span_end(spans)
@@ -167,6 +180,16 @@ def _render_html(normalized: Dict[str, Any]) -> str:
             return False
         for t_start, t_end in table_ranges:
             if p_start < t_end and t_start < p_end:
+                return True
+        return False
+
+    def _in_figure_span(spans: list[dict]) -> bool:
+        p_start = _span_start(spans)
+        p_end = _span_end(spans)
+        if p_start is None or p_end is None:
+            return False
+        for f_start, f_end in figure_ranges:
+            if p_start < f_end and f_start < p_end:
                 return True
         return False
 
@@ -195,11 +218,20 @@ def _render_html(normalized: Dict[str, Any]) -> str:
     blocks = []
     para_seq = 0
     table_seq = 0
+    figure_caption_texts = {
+        (f.get("caption") or "").strip()
+        for f in figures
+        if isinstance(f.get("caption"), str) and (f.get("caption") or "").strip()
+    }
     for p_index, p in enumerate(paragraphs):
         text = (p.get("text") or "").strip()
         if not text:
             continue
+        if text in figure_caption_texts:
+            continue
         if _in_table_span(p.get("spans", [])):
+            continue
+        if _in_figure_span(p.get("spans", [])):
             continue
         blocks.append(
             {
@@ -215,6 +247,8 @@ def _render_html(normalized: Dict[str, Any]) -> str:
         para_seq += 1
 
     for t_index, t in enumerate(tables):
+        if _in_figure_span(t.get("spans", [])):
+            continue
         blocks.append(
             {
                 "type": "table",
@@ -226,6 +260,22 @@ def _render_html(normalized: Dict[str, Any]) -> str:
             }
         )
         table_seq += 1
+
+    for f_index, f in enumerate(figures):
+        fig_id = (f.get("id") or "").strip() or f"figure-{f_index + 1}"
+        fig_content = (f.get("caption") or "").strip()
+        anchor_spans = f.get("caption_spans") or f.get("spans", [])
+        blocks.append(
+            {
+                "type": "figure",
+                "figure_id": fig_id,
+                "figure_content": fig_content,
+                "spans": anchor_spans,
+                "bounding_regions": f.get("bounding_regions", []),
+                "seq": f_index,
+                "source_ref": f"/figures/{f_index}",
+            }
+        )
 
     ref_to_section_rank: dict[str, int] = {}
     if isinstance(sections, list) and sections:
@@ -267,14 +317,14 @@ def _render_html(normalized: Dict[str, Any]) -> str:
             ref_to_section_rank[ref] = rank
 
     def _block_sort_key(block: dict):
-        section_key = ref_to_section_rank.get(block.get("source_ref", ""), 10**9)
-        page_key = _page_hint(block)
-        y_key = _y_hint(block)
         start = _span_start(block.get("spans", []))
         span_missing = 1 if start is None else 0
         span_key = start if start is not None else 10**12
-        # Prefer section graph order when present, then page layout and span tie-breakers.
-        return (section_key, page_key, y_key, span_missing, span_key, block.get("seq", 0))
+        section_key = ref_to_section_rank.get(block.get("source_ref", ""), 10**9)
+        page_key = _page_hint(block)
+        y_key = _y_hint(block)
+        # Prefer global text-span flow first. Fall back to section/page geometry when spans are missing.
+        return (span_missing, span_key, section_key, page_key, y_key, block.get("seq", 0))
 
     blocks.sort(key=_block_sort_key)
 
@@ -282,6 +332,17 @@ def _render_html(normalized: Dict[str, Any]) -> str:
     i = 0
     while i < len(blocks):
         block = blocks[i]
+        if block.get("type") == "figure":
+            if in_list:
+                parts.append("</ul>")
+                in_list = False
+            parts.append(
+                f"<figure id=\"{escape(block.get('figure_id', ''))}\">"
+                f"{escape(block.get('figure_content', ''))}</figure>"
+            )
+            i += 1
+            continue
+
         if block.get("type") == "table":
             if in_list:
                 parts.append("</ul>")
