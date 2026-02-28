@@ -57,10 +57,16 @@ def main() -> int:
         default=None,
         help="Output path. If omitted, defaults to data/raw, data/normalized, or data/html based on mode.",
     )
+    parser.add_argument(
+        "--content-format",
+        choices=["text", "markdown"],
+        default="text",
+        help="Content format of DI output. 'text' or 'markdown'. Default 'text'.",
+    )
     args = parser.parse_args()
 
     try:
-        payload = analyze_any(args.src, model_id=args.model, output_mode=args.mode)
+        payload = analyze_any(args.src, model_id=args.model, output_mode=args.mode, content_format=args.content_format)
     except FileNotFoundError as exc:
         print(f"Error: {exc}")
 

@@ -6,6 +6,7 @@ from urllib.request import Request, urlopen
 from urllib.parse import urlparse
 
 from azure.core.exceptions import HttpResponseError
+from azure.ai.documentintelligence.models import DocumentContentFormat
 
 from .normalize import to_html_payload, to_normalized_json, to_raw_json
 from .service import DocumentIntelligenceService
@@ -122,7 +123,10 @@ def _serialize(result, output_mode: OutputMode) -> Dict | str:
 
 
 def analyze_any(
-    src: str, model_id: str = "prebuilt-layout", output_mode: OutputMode = "raw"
+    src: str,
+    model_id: str = "prebuilt-layout",
+    output_mode: OutputMode = "raw",
+    content_format: DocumentContentFormat = DocumentContentFormat.TEXT
 ) -> Dict | str:
     service = DocumentIntelligenceService()
     kind, ext = _detect_kind(src)
@@ -140,7 +144,11 @@ def analyze_any(
                     raise ValueError(
                         f"Failed to download URL locally: {fetch_exc}"
                     ) from fetch_exc
-                result = service.analyze_bytes(data=data, model_id=model_id)
+                result = service.analyze_bytes(
+                    data=data,
+                    model_id=model_id,
+                    content_format=content_format
+                )
             else:
                 raise
         return _serialize(result, output_mode)
@@ -151,7 +159,12 @@ def analyze_any(
 
     if ext == ".md":
         html = _tiny_markdown_to_html(path.read_text(encoding="utf-8"))
-        result = service.analyze_bytes(data=html.encode("utf-8"), model_id=model_id)
+        result = service.analyze_bytes(
+            data=html.encode("utf-8"),
+            model_id=model_id,
+            content_format=content_format
+        )
+
         return _serialize(result, output_mode)
 
     if ext not in SUPPORTED_DIRECT:
@@ -159,7 +172,8 @@ def analyze_any(
             f"Unsupported file extension: {ext or '<none>'}. Convert to PDF/HTML first."
         )
 
-    result = service.analyze_file(path=path, model_id=model_id)
+    result = service.analyze_file(path=path, model_id=model_id, content_format=content_format)
+
     return _serialize(result, output_mode)
 
 
