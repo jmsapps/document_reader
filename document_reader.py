@@ -4,7 +4,8 @@ from urllib.parse import urlparse
 
 from azure.core.exceptions import HttpResponseError
 
-from src.document_intelligence.reader import analyze_any, save_output
+from src.pipelines import DirectPipeline, DirectPipelineOptions
+from src.storage import LocalOutputStore
 
 
 def _default_output_path(src: str, content_format: str) -> str:
@@ -55,8 +56,15 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    pipeline = DirectPipeline()
+    options = DirectPipelineOptions(
+        src=args.src,
+        model_id=args.model,
+        content_format=args.content_format,
+    )
+
     try:
-        payload = analyze_any(args.src, model_id=args.model, content_format=args.content_format)
+        payload = pipeline.run(options)
     except FileNotFoundError as exc:
         print(f"Error: {exc}")
 
@@ -73,8 +81,8 @@ def main() -> int:
         return 3
 
     out_path = args.out or _default_output_path(args.src, args.content_format)
-    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    save_output(payload, out_path)
+    store = LocalOutputStore()
+    store.save(payload, out_path)
 
     print(f"Saved {out_path}")
 
