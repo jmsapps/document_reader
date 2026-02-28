@@ -26,9 +26,16 @@ class DocumentIntelligenceService:
 
         return IAM().get_credential()
 
-    def analyze_url(self, url: str, model_id: str = "prebuilt-layout") -> Any:
+    def analyze_url(
+        self,
+        url: str,
+        model_id: str = "prebuilt-layout",
+        content_format: DocumentContentFormat = DocumentContentFormat.TEXT,
+    ) -> Any:
         poller = self.client.begin_analyze_document(
-            model_id=model_id, body={"urlSource": url}
+            model_id=model_id,
+            body={"urlSource": url},
+            output_content_format=content_format,
         )
         return poller.result()
 

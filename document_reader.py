@@ -7,19 +7,10 @@ from azure.core.exceptions import HttpResponseError
 from src.document_intelligence.reader import analyze_any, save_output
 
 
-def _default_output_path(src: str, mode: str) -> str:
-    if mode == "raw":
-        folder = "raw"
-        prefix = "raw_"
-        suffix = ".json"
-    elif mode == "normalized":
-        folder = "normalized"
-        prefix = "normalized_"
-        suffix = ".json"
-    else:
-        folder = "html"
-        prefix = "html_"
-        suffix = ".json"
+def _default_output_path(src: str) -> str:
+    folder = "raw"
+    prefix = "raw_"
+    suffix = ".json"
 
     parsed = urlparse(src)
     if parsed.scheme in ("http", "https"):
@@ -34,39 +25,38 @@ def _default_output_path(src: str, mode: str) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Analyze documents with Azure Document Intelligence and save JSON."
+        description="Analyze documents with Azure Document Intelligence and save JSON.",
+        allow_abbrev=False,
     )
     parser.add_argument(
         "--src",
+        "-s",
         required=True,
         help="Local path or URL. Supports pdf/images/docx/pptx/xlsx/html and markdown.",
     )
     parser.add_argument(
         "--model",
+        "-m",
         default="prebuilt-layout",
         help="Document Intelligence model id. Default: prebuilt-layout",
     )
     parser.add_argument(
-        "--mode",
-        default="raw",
-        choices=["raw", "normalized", "html"],
-        help="Output mode. raw=DI JSON, normalized=canonical schema, html=structured HTML.",
+        "--content-format",
+        "-f",
+        choices=["text", "markdown", "html"],
+        default="text",
+        help="Content format for `content` field. text|markdown from DI, html rendered from raw layout.",
     )
     parser.add_argument(
         "--out",
+        "-o",
         default=None,
-        help="Output path. If omitted, defaults to data/raw, data/normalized, or data/html based on mode.",
-    )
-    parser.add_argument(
-        "--content-format",
-        choices=["text", "markdown"],
-        default="text",
-        help="Content format of DI output. 'text' or 'markdown'. Default 'text'.",
+        help="Output path. If omitted, defaults to data/raw.",
     )
     args = parser.parse_args()
 
     try:
-        payload = analyze_any(args.src, model_id=args.model, output_mode=args.mode, content_format=args.content_format)
+        payload = analyze_any(args.src, model_id=args.model, content_format=args.content_format)
     except FileNotFoundError as exc:
         print(f"Error: {exc}")
 
@@ -82,7 +72,7 @@ def main() -> int:
 
         return 3
 
-    out_path = args.out or _default_output_path(args.src, args.mode)
+    out_path = args.out or _default_output_path(args.src)
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     save_output(payload, out_path)
 

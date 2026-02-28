@@ -5,10 +5,10 @@ Basic Python document reader:
 - Accepts local files or URLs
 - Supports `pdf/images/docx/pptx/xlsx/html` directly
 - Supports `markdown` via lightweight MD->HTML conversion
-- Output modes:
-  - `raw`: Azure Document Intelligence raw JSON
-  - `normalized`: stable structured JSON
-  - `html`: JSON payload with key fields + `content_html` string
+- Content formats (`--content-format`):
+  - `text`: DI content as plain text
+  - `markdown`: DI content as markdown
+  - `html`: app-generated HTML written into raw JSON `content` field (third mode)
 - Auth:
   - uses API key if present
   - otherwise uses IAM (`DefaultAzureCredential`)
@@ -41,28 +41,28 @@ export DOCUMENTINTELLIGENCE_API_KEY="<your-api-key>"
 
 ## Run
 
-Raw output:
+Raw output (default text content):
 
 ```bash
-python document_reader.py --src ./sample.pdf --mode raw
+python document_reader.py --src ./sample.pdf
 ```
 
-Normalized JSON:
+Raw output with markdown content:
 
 ```bash
-python document_reader.py --src ./sample.docx --mode normalized
+python document_reader.py --src ./sample.docx --content-format markdown
 ```
 
-HTML payload JSON:
+Raw output with HTML content:
 
 ```bash
-python document_reader.py --src ./sample.pdf --mode html
+python document_reader.py --src ./sample.pdf --content-format html
 ```
 
 Analyze URL source:
 
 ```bash
-python document_reader.py --src "https://<storage-url-or-public-url>" --mode raw
+python document_reader.py --src "https://<storage-url-or-public-url>"
 ```
 
 Use `prebuilt-read` if you only need text:
@@ -71,16 +71,22 @@ Use `prebuilt-read` if you only need text:
 python document_reader.py --src ./sample.pdf --model prebuilt-read
 ```
 
+### Content format modes
+
+`--content-format` supports three modes:
+
+- `text` (default): DI plain text output in `content`
+- `markdown`: DI markdown output in `content`
+- `html`: HTML parsed output in `content`
+
 ## Default output paths
 
 If `--out` is omitted:
 
-- `--mode raw` -> `data/raw/raw_<input_name>.json`
-- `--mode normalized` -> `data/normalized/normalized_<input_name>.json`
-- `--mode html` -> `data/html/html_<input_name>.json`
+- `data/raw/raw_<input_name>.json`
 
 You can override with:
 
 ```bash
-python document_reader.py --src ./sample.pdf --mode raw --out ./any/path/output.json
+python document_reader.py --src ./sample.pdf --out ./any/path/output.json
 ```

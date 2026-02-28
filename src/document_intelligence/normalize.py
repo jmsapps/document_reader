@@ -361,7 +361,11 @@ def _render_html(normalized: Dict[str, Any]) -> str:
     return "".join(parts)
 
 
-def to_html_payload(result: Any) -> Dict[str, Any]:
+def to_html_payload(result: Dict) -> str:
+    normalized = to_normalized_json(result)
+    return _render_html(normalized)
+
+def get_metadata(result: Dict) -> Dict[str, Any]:
     normalized = to_normalized_json(result)
     paragraphs = normalized.get("paragraphs", [])
 
@@ -379,5 +383,4 @@ def to_html_payload(result: Any) -> Dict[str, Any]:
         "paragraphs_count": len(paragraphs),
         "tables_count": len(normalized.get("tables", [])),
         "figures_count": len(normalized.get("figures", [])),
-        "content_html": _render_html(normalized),
     }

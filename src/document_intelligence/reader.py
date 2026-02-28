@@ -8,10 +8,10 @@ from urllib.parse import urlparse
 from azure.core.exceptions import HttpResponseError
 from azure.ai.documentintelligence.models import DocumentContentFormat
 
-from .normalize import to_html_payload, to_normalized_json, to_raw_json
+from .normalize import to_html_payload, to_raw_json, get_metadata
 from .service import DocumentIntelligenceService
 
-OutputMode = Literal["raw", "normalized", "html"]
+ContentFormat = Literal["text", "markdown", "html"]
 
 SUPPORTED_DIRECT = {
     ".pdf",
@@ -113,27 +113,39 @@ def _tiny_markdown_to_html(md_text: str) -> str:
     )
 
 
-def _serialize(result, output_mode: OutputMode) -> Dict | str:
-    if output_mode == "raw":
-        return to_raw_json(result)
-    if output_mode == "html":
-        return to_html_payload(result)
+def _to_di_content_format(content_format: ContentFormat) -> DocumentContentFormat:
+    # For HTML output we render from extracted structure, so TEXT is the fastest DI format.
+    if content_format == "markdown":
+        return DocumentContentFormat.MARKDOWN
 
-    return to_normalized_json(result)
+    return DocumentContentFormat.TEXT
+
+
+def _serialize_raw(result, content_format: ContentFormat) -> Dict:
+    payload = to_raw_json(result)
+    payload["contentFormat"] = content_format
+    payload["metadata"] = get_metadata(result)
+
+    if content_format == "html":
+        payload["content"] = to_html_payload(result)
+
+    return payload
 
 
 def analyze_any(
     src: str,
     model_id: str = "prebuilt-layout",
-    output_mode: OutputMode = "raw",
-    content_format: DocumentContentFormat = DocumentContentFormat.TEXT
-) -> Dict | str:
+    content_format: ContentFormat = "text",
+) -> Dict:
     service = DocumentIntelligenceService()
     kind, ext = _detect_kind(src)
+    di_content_format = _to_di_content_format(content_format)
 
     if kind == "url":
         try:
-            result = service.analyze_url(url=src, model_id=model_id)
+            result = service.analyze_url(
+                url=src, model_id=model_id, content_format=di_content_format
+            )
         except HttpResponseError as exc:
             message = (exc.message or "").lower()
             # DI sometimes cannot fetch externally accessible URLs due to source-side restrictions.
@@ -147,11 +159,11 @@ def analyze_any(
                 result = service.analyze_bytes(
                     data=data,
                     model_id=model_id,
-                    content_format=content_format
+                    content_format=di_content_format,
                 )
             else:
                 raise
-        return _serialize(result, output_mode)
+        return _serialize_raw(result, content_format)
 
     path = Path(src)
     if not path.exists():
@@ -162,19 +174,21 @@ def analyze_any(
         result = service.analyze_bytes(
             data=html.encode("utf-8"),
             model_id=model_id,
-            content_format=content_format
+            content_format=di_content_format,
         )
 
-        return _serialize(result, output_mode)
+        return _serialize_raw(result, content_format)
 
     if ext not in SUPPORTED_DIRECT:
         raise ValueError(
             f"Unsupported file extension: {ext or '<none>'}. Convert to PDF/HTML first."
         )
 
-    result = service.analyze_file(path=path, model_id=model_id, content_format=content_format)
+    result = service.analyze_file(
+        path=path, model_id=model_id, content_format=di_content_format
+    )
 
-    return _serialize(result, output_mode)
+    return _serialize_raw(result, content_format)
 
 
 def save_output(payload: Any, out_path: str) -> None:
