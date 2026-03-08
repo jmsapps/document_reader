@@ -6,16 +6,16 @@ from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.ai.documentintelligence.models import DocumentContentFormat
 from azure.core.credentials import AzureKeyCredential
 
-from ...auth.iam import IAM
-from ...conf.conf import get_config
+from src.auth.iam import IAM
+from src.conf.conf import get_config
 
 
 class DocumentIntelligenceService:
     def __init__(self) -> None:
         config = get_config()
-        credential = self._build_credential(config["api_key"])
+        credential = self._build_credential(config["document_intelligence_api_key"])
         self.client = DocumentIntelligenceClient(
-            endpoint=config["endpoint"],
+            endpoint=config["document_intelligence_endpoint"],
             credential=credential,
         )
 

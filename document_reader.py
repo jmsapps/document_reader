@@ -4,7 +4,9 @@ from urllib.parse import urlparse
 
 from azure.core.exceptions import HttpResponseError
 
+from src.conf import get_config
 from src.pipelines import DirectPipeline, DirectPipelineOptions
+from src.services.storage_account import AzureStorageAccountService
 from src.storage import LocalOutputStore
 
 
@@ -19,9 +21,7 @@ def _default_output_path(src: str, content_format: str) -> str:
     else:
         stem = Path(src).stem or "document"
 
-    out_dir = Path("data") / folder
-    out_dir.mkdir(parents=True, exist_ok=True)
-    return str(out_dir / f"{prefix}{stem}{suffix}")
+    return f"{folder}/{prefix}{stem}{suffix}"
 
 
 def main() -> int:
@@ -80,11 +80,38 @@ def main() -> int:
 
         return 3
 
-    out_path = args.out or _default_output_path(args.src, args.content_format)
-    store = LocalOutputStore()
-    store.save(payload, out_path)
+    container = "data"
+    filename = args.out or _default_output_path(args.src, args.content_format)
+    config = get_config()
+    storage_blob_endpoint = config.get("storage_blob_endpoint")
+    storage_blob_api_key = config.get("storage_blob_api_key")
 
-    print(f"Saved {out_path}")
+    if storage_blob_endpoint:
+        storage_service = AzureStorageAccountService(
+            endpoint=storage_blob_endpoint,
+            api_key=storage_blob_api_key,
+        )
+
+        blob_name = filename.lstrip("/").replace("\\", "/")
+        if isinstance(payload, str):
+            saved_to = storage_service.upload_text(
+                container_name=container,
+                blob_name=blob_name,
+                text=payload,
+            )
+        else:
+            saved_to = storage_service.upload_json(
+                container_name=container,
+                blob_name=blob_name,
+                payload=payload,
+            )
+    else:
+        out_path = f"{container}/{filename}"
+        store = LocalOutputStore()
+        store.save(payload, out_path)
+        saved_to = out_path
+
+    print(f"Saved {saved_to}")
 
     return 0
 
