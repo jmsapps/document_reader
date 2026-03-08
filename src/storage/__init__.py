@@ -1,3 +1,3 @@
-from .output_store import LocalOutputStore, OutputStore
+from .output_store import LocalOutputStore
 
-__all__ = ["LocalOutputStore", "OutputStore"]
+__all__ = ["LocalOutputStore"]

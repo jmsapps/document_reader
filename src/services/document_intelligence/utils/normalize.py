@@ -422,11 +422,11 @@ def _render_html(normalized: Dict[str, Any]) -> str:
     return "".join(parts)
 
 
-def to_html_payload(result: Dict) -> str:
+def to_html_payload(result: Any) -> str:
     normalized = to_normalized_json(result)
     return _render_html(normalized)
 
-def get_metadata(result: Dict) -> Dict[str, Any]:
+def get_metadata(result: Any) -> Dict[str, Any]:
     normalized = to_normalized_json(result)
     paragraphs = normalized.get("paragraphs", [])
 

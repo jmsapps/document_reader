@@ -3,12 +3,13 @@ from typing import Any, Dict, Literal, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+from html import escape
 
 from azure.ai.documentintelligence.models import DocumentContentFormat
 from azure.core.exceptions import HttpResponseError
 
-from ...document_intelligence.normalize import get_metadata, to_html_payload, to_raw_json
 from .service import DocumentIntelligenceService
+from .utils.normalize import get_metadata, to_html_payload, to_raw_json
 
 ContentFormat = Literal["text", "markdown", "html"]
 
@@ -81,14 +82,14 @@ def _tiny_markdown_to_html(md_text: str) -> str:
                 html_lines.append("</ul>")
                 in_list = False
             level = min(6, len(line) - len(line.lstrip("#")))
-            html_lines.append(f"<h{level}>{line[level:].strip()}</h{level}>")
+            html_lines.append(f"<h{level}>{escape(line[level:].strip())}</h{level}>")
             continue
 
         if stripped.startswith("- ") or stripped.startswith("* "):
             if not in_list:
                 html_lines.append("<ul>")
                 in_list = True
-            html_lines.append(f"<li>{stripped[2:].strip()}</li>")
+            html_lines.append(f"<li>{escape(stripped[2:].strip())}</li>")
             continue
 
         if in_list:
@@ -98,7 +99,7 @@ def _tiny_markdown_to_html(md_text: str) -> str:
         if stripped == "":
             html_lines.append("<br/>")
         else:
-            html_lines.append(f"<p>{line}</p>")
+            html_lines.append(f"<p>{escape(line)}</p>")
 
     if in_list:
         html_lines.append("</ul>")
