@@ -1,4 +1,11 @@
 from .direct import DirectPipeline
-from .types import DirectPipelineOptions
+from .layout_skill import LayoutSkillPipeline
+from .types import DirectPipelineOptions, LayoutSkillPipelineOptions, PipelineName
 
-__all__ = ["DirectPipeline", "DirectPipelineOptions"]
+__all__ = [
+    "DirectPipeline",
+    "DirectPipelineOptions",
+    "LayoutSkillPipeline",
+    "LayoutSkillPipelineOptions",
+    "PipelineName",
+]

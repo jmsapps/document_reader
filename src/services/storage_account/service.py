@@ -1,8 +1,9 @@
 import json
 from typing import Any
 
-from azure.storage.blob import BlobServiceClient
+from azure.storage.blob import BlobServiceClient, ContentSettings
 from azure.core.credentials import TokenCredential
+from azure.core.exceptions import HttpResponseError, ResourceNotFoundError, ResourceExistsError
 
 from src.auth.iam import IAM
 
@@ -27,13 +28,24 @@ class AzureStorageAccountService:
         return self.client.get_service_properties()  # type: ignore[no-any-return]
 
     def ensure_container(self, container_name: str) -> None:
-        from azure.core.exceptions import ResourceExistsError
-
         container_client = self.client.get_container_client(container_name)
+
         try:
             container_client.create_container()
         except ResourceExistsError:
             pass
+
+    def delete_container_if_exists(self, container_name: str) -> None:
+        container_client = self.client.get_container_client(container_name)
+        try:
+            container_client.delete_container()
+        except ResourceNotFoundError:
+            return
+        except HttpResponseError as exc:
+            message = (str(exc) or "").lower()
+            if "containernotfound" in message or "container does not exist" in message:
+                return
+            raise
 
     def upload_bytes(
         self,
@@ -44,8 +56,6 @@ class AzureStorageAccountService:
         content_type: str | None = None,
         overwrite: bool = True,
     ) -> str:
-        from azure.storage.blob import ContentSettings
-
         self.ensure_container(container_name)
         blob_client = self.client.get_blob_client(container=container_name, blob=blob_name)
         kwargs: dict[str, Any] = {"overwrite": overwrite}
@@ -94,7 +104,11 @@ class AzureStorageAccountService:
 
     def blob_exists(self, *, container_name: str, blob_name: str) -> bool:
         blob_client = self.client.get_blob_client(container=container_name, blob=blob_name)
-        return blob_client.exists()
+
+        try:
+            return blob_client.exists()
+        except (ResourceNotFoundError, HttpResponseError):
+            return False
 
     def list_blobs(self, *, container_name: str, prefix: str | None = None) -> list[str]:
         container_client = self.client.get_container_client(container_name)
