@@ -33,3 +33,5 @@ MANIFEST
 documents/*
 data/*
 .env
+
+AGENTS.md
