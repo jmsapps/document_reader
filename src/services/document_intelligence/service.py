@@ -13,9 +13,11 @@ from src.conf.conf import get_config
 class DocumentIntelligenceService:
     def __init__(self) -> None:
         config = get_config()
+        endpoint = config["document_intelligence_endpoint"]
         credential = self._build_credential(config["document_intelligence_api_key"])
+
         self.client = DocumentIntelligenceClient(
-            endpoint=config["document_intelligence_endpoint"],
+            endpoint=endpoint,
             credential=credential,
         )
 
