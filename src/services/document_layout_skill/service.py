@@ -15,6 +15,18 @@ from src.services.storage_account import AzureStorageAccountService
 SEARCH_API_VERSION = "2025-09-01"
 
 
+class SearchApiError(ValueError):
+    """Structured Azure AI Search REST error."""
+
+    def __init__(self, *, method: str, path: str, status_code: int | None, detail: str) -> None:
+        self.method = method
+        self.path = path
+        self.status_code = status_code
+        self.detail = detail
+        status_text = f"status={status_code} " if status_code is not None else ""
+        super().__init__(f"Search API {method} {path} failed: {status_text}detail={detail}")
+
+
 class DocumentLayoutSkillService:
     """Orchestrates Azure AI Search DocumentIntelligenceLayoutSkill indexing flow."""
 
@@ -78,9 +90,19 @@ class DocumentLayoutSkillService:
                 return json.loads(raw.decode("utf-8")) if raw else {}
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise ValueError(f"Search API {method} {path} failed: status={exc.code} detail={detail}") from exc
+            raise SearchApiError(
+                method=method,
+                path=path,
+                status_code=exc.code,
+                detail=detail,
+            ) from exc
         except URLError as exc:
-            raise ValueError(f"Search API {method} {path} failed: {exc}") from exc
+            raise SearchApiError(
+                method=method,
+                path=path,
+                status_code=None,
+                detail=str(exc),
+            ) from exc
 
     def _search_delete_if_exists(self, path: str) -> None:
         url = f"{self.search_endpoint}{path}?api-version={SEARCH_API_VERSION}"
@@ -95,9 +117,54 @@ class DocumentLayoutSkillService:
             if exc.code == 404:
                 return
             detail = exc.read().decode("utf-8", errors="replace")
-            raise ValueError(f"Search API DELETE {path} failed: status={exc.code} detail={detail}") from exc
+            raise SearchApiError(
+                method="DELETE",
+                path=path,
+                status_code=exc.code,
+                detail=detail,
+            ) from exc
         except URLError as exc:
-            raise ValueError(f"Search API DELETE {path} failed: {exc}") from exc
+            raise SearchApiError(
+                method="DELETE",
+                path=path,
+                status_code=None,
+                detail=str(exc),
+            ) from exc
+
+    def _run_indexer_with_backoff(self, *, indexer_name: str, max_wait_seconds: float = 5.0) -> None:
+        """Run indexer with bounded exponential backoff for transient 409 conflicts."""
+        start = time.time()
+        attempt = 0
+
+        while True:
+            try:
+                self._search_request("POST", f"/indexers/{quote(indexer_name)}/run")
+                return
+            except SearchApiError as exc:
+                detail = (exc.detail or "").lower()
+                is_concurrent_conflict = (
+                    exc.status_code == 409
+                    and "concurrent invocations are not allowed" in detail
+                )
+                if not is_concurrent_conflict:
+                    raise
+
+                elapsed = time.time() - start
+                remaining = max_wait_seconds - elapsed
+                if remaining <= 0:
+                    raise SearchApiError(
+                        method="POST",
+                        path=f"/indexers/{quote(indexer_name)}/run",
+                        status_code=409,
+                        detail=(
+                            "Indexer invocation remained in concurrent-invocation conflict "
+                            f"after {max_wait_seconds:.1f}s of retry."
+                        ),
+                    ) from exc
+
+                delay = min(0.5 * (2**attempt), remaining)
+                time.sleep(delay)
+                attempt += 1
 
     @staticmethod
     def _tiny_markdown_to_html(md_text: str) -> str:
@@ -367,13 +434,14 @@ class DocumentLayoutSkillService:
             },
         )
 
-        self._search_request("POST", f"/indexers/{quote(indexer_name)}/run")
+        self._run_indexer_with_backoff(indexer_name=indexer_name, max_wait_seconds=5.0)
 
         status = self._wait_for_indexer(
             lambda: self._search_request("GET", f"/indexers/{quote(indexer_name)}/status")
         )
 
-        source_filter = f"source_path eq '{source_blob_url.replace("'", "''")}'"
+        escaped_source_blob_url = source_blob_url.replace("'", "''")
+        source_filter = f"source_path eq '{escaped_source_blob_url}'"
         chunks = self._search_request(
             "POST",
             f"/indexes/{quote(text_index_name)}/docs/search",

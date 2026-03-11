@@ -13,7 +13,7 @@ class AppConfig(TypedDict):
 
 
 def get_config() -> AppConfig:
-    load_dotenv()
+    load_dotenv(dotenv_path=".env", override=True)
 
     document_intelligence_endpoint = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT")
 
