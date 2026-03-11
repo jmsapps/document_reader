@@ -1,4 +1,5 @@
 import json
+import time
 from typing import Any
 
 from azure.storage.blob import BlobServiceClient, ContentSettings
@@ -27,13 +28,48 @@ class AzureStorageAccountService:
     def test_connection(self) -> dict[str, Any]:
         return self.client.get_service_properties()  # type: ignore[no-any-return]
 
+    @staticmethod
+    def _is_not_found_error(exc: Exception) -> bool:
+        message = (str(exc) or "").lower()
+        return "containernotfound" in message or "container does not exist" in message
+
+    @staticmethod
+    def _is_being_deleted_error(exc: Exception) -> bool:
+        message = (str(exc) or "").lower()
+        return "containerbeingdeleted" in message or "being deleted" in message
+
+    def _container_exists(self, container_name: str) -> bool:
+        container_client = self.client.get_container_client(container_name)
+        try:
+            container_client.get_container_properties()
+            return True
+        except ResourceNotFoundError:
+            return False
+        except HttpResponseError as exc:
+            if self._is_not_found_error(exc):
+                return False
+            raise
+
     def ensure_container(self, container_name: str) -> None:
         container_client = self.client.get_container_client(container_name)
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            try:
+                container_client.create_container()
+            except ResourceExistsError:
+                pass
+            except HttpResponseError as exc:
+                if self._is_being_deleted_error(exc):
+                    time.sleep(1)
+                    continue
+                raise
 
-        try:
-            container_client.create_container()
-        except ResourceExistsError:
-            pass
+            if self._container_exists(container_name):
+                return
+
+            time.sleep(1)
+
+        raise TimeoutError(f"Timed out ensuring container exists: {container_name}")
 
     def delete_container_if_exists(self, container_name: str) -> None:
         container_client = self.client.get_container_client(container_name)
@@ -42,10 +78,17 @@ class AzureStorageAccountService:
         except ResourceNotFoundError:
             return
         except HttpResponseError as exc:
-            message = (str(exc) or "").lower()
-            if "containernotfound" in message or "container does not exist" in message:
+            if self._is_not_found_error(exc):
                 return
             raise
+
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            if not self._container_exists(container_name):
+                return
+            time.sleep(1)
+
+        raise TimeoutError(f"Timed out deleting container: {container_name}")
 
     def upload_bytes(
         self,
