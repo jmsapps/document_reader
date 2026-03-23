@@ -12,7 +12,17 @@ from urllib.request import Request, urlopen
 from src.conf.conf import get_config
 from src.services.storage_account import AzureStorageAccountService
 
-SEARCH_API_VERSION = "2025-09-01"
+SEARCH_API_VERSION = "2025-11-01-preview"
+EMBEDDING_DIMENSIONS = 1024
+AI_VISION_MODEL_VERSION = "2023-04-15"
+MAX_MULTIMODAL_TEXT_CHARS = 450
+VECTOR_ALGORITHM_NAME = "vector-hnsw"
+VECTOR_PROFILE_NAME = "vector-profile"
+VECTOR_VECTORIZER_NAME = "vision-vectorizer"
+TEXT_EMBEDDING_SKILL_NAME = "#text-vectorize"
+IMAGE_EMBEDDING_SKILL_NAME = "#image-vectorize"
+TEXT_VECTOR_FIELD_NAME = "chunk_vector"
+IMAGE_VECTOR_FIELD_NAME = "image_vector"
 
 
 class SearchApiError(ValueError):
@@ -24,7 +34,7 @@ class SearchApiError(ValueError):
         self.status_code = status_code
         self.detail = detail
         status_text = f"status={status_code} " if status_code is not None else ""
-        super().__init__(f"Search API {method} {path} failed: {status_text}detail={detail}")
+        super().__init__(f"Search API {method} {path} failed: {status_text} detail={detail}")
 
 
 class DocumentLayoutSkillService:
@@ -36,6 +46,10 @@ class DocumentLayoutSkillService:
         search_api_key = config.get("ai_search_api_key")
         storage_blob_endpoint = config.get("storage_blob_endpoint")
         storage_blob_api_key = config.get("storage_blob_api_key")
+        foundry_endpoint = config.get("foundry_endpoint")
+        foundry_api_key = config.get("foundry_api_key")
+        ai_vision_model_version = config.get("ai_vision_model_version") or AI_VISION_MODEL_VERSION
+        ai_vision_embedding_dimensions = config.get("ai_vision_embedding_dimensions") or EMBEDDING_DIMENSIONS
 
         if not search_endpoint:
             raise ValueError("Missing AZURE_AI_SEARCH_ENDPOINT.")
@@ -45,20 +59,39 @@ class DocumentLayoutSkillService:
             raise ValueError("Missing AZURE_STORAGE_BLOB_ENDPOINT.")
         if not storage_blob_api_key:
             raise ValueError("Missing AZURE_STORAGE_BLOB_API_KEY (key-based auth required).")
+        if not foundry_endpoint:
+            raise ValueError("Missing AZURE_FOUNDRY_ENDPOINT for multimodal layout skillset.")
+        if not foundry_api_key:
+            raise ValueError("Missing AZURE_FOUNDRY_API_KEY for multimodal layout skillset.")
 
         self.search_endpoint: str = search_endpoint.rstrip("/")
         self.search_api_key: str = search_api_key
         self.storage_blob_endpoint: str = storage_blob_endpoint.rstrip("/")
         self.storage_blob_api_key: str = storage_blob_api_key
+        self.foundry_resource_uri: str = self._normalize_foundry_resource_uri(foundry_endpoint)
+        self.foundry_api_key: str = foundry_api_key
+        self.ai_vision_model_version: str = ai_vision_model_version
+        self.embedding_dimensions: int = int(ai_vision_embedding_dimensions)
         self.storage_service = AzureStorageAccountService(
             endpoint=storage_blob_endpoint,
             api_key=storage_blob_api_key,
         )
 
     @staticmethod
+    def _log(message: str) -> None:
+        print(f"[document-layout-skill] {message}", flush=True)
+
+    @staticmethod
     def _slug(value: str) -> str:
         slug = re.sub(r"[^a-z0-9-]+", "-", value.strip().lower())
         return slug.strip("-") or "document-layout"
+
+    @staticmethod
+    def _normalize_foundry_resource_uri(endpoint: str) -> str:
+        normalized = endpoint.rstrip("/")
+        if "/api/projects/" in normalized:
+            normalized = normalized.split("/api/projects/", 1)[0]
+        return normalized
 
     @staticmethod
     def _account_name_from_blob_endpoint(blob_endpoint: str) -> str:
@@ -104,6 +137,46 @@ class DocumentLayoutSkillService:
                 detail=str(exc),
             ) from exc
 
+    def _vector_search_config(self) -> dict[str, Any]:
+        return {
+            "algorithms": [
+                {
+                    "name": VECTOR_ALGORITHM_NAME,
+                    "kind": "hnsw",
+                    "hnswParameters": {
+                        "metric": "cosine",
+                    },
+                }
+            ],
+            "profiles": [
+                {
+                    "name": VECTOR_PROFILE_NAME,
+                    "algorithm": VECTOR_ALGORITHM_NAME,
+                    "vectorizer": VECTOR_VECTORIZER_NAME,
+                }
+            ],
+            "vectorizers": [
+                {
+                    "name": VECTOR_VECTORIZER_NAME,
+                    "kind": "aiServicesVision",
+                    "aiServicesVisionParameters": {
+                        "resourceUri": self.foundry_resource_uri,
+                        "apiKey": self.foundry_api_key,
+                        "modelVersion": self.ai_vision_model_version,
+                    },
+                }
+            ],
+        }
+
+    def _effective_chunk_size(self, chunk_size: int) -> int:
+        requested_chunk_size = max(200, int(chunk_size))
+        if requested_chunk_size > MAX_MULTIMODAL_TEXT_CHARS:
+            self._log(
+                "Requested chunk_size exceeds Azure Vision multimodal text limits; "
+                f"capping from {requested_chunk_size} to {MAX_MULTIMODAL_TEXT_CHARS} characters"
+            )
+        return min(requested_chunk_size, MAX_MULTIMODAL_TEXT_CHARS)
+
     def _search_delete_if_exists(self, path: str) -> None:
         url = f"{self.search_endpoint}{path}?api-version={SEARCH_API_VERSION}"
         req = Request(url, method="DELETE")
@@ -131,6 +204,24 @@ class DocumentLayoutSkillService:
                 detail=str(exc),
             ) from exc
 
+    def _create_or_update_index(self, *, index_name: str, body: dict[str, Any], hard_refresh: bool) -> None:
+        self._log(f"Creating or updating index '{index_name}'")
+        try:
+            self._search_request("PUT", f"/indexes/{quote(index_name)}", body)
+        except SearchApiError as exc:
+            detail = exc.detail or ""
+            requires_recreate = (
+                exc.status_code == 400
+                and "cannot have the 'stored' property set to false" in detail.lower()
+                and not hard_refresh
+            )
+            if requires_recreate:
+                raise ValueError(
+                    "Existing Azure AI Search indexes must be recreated to add vector fields. "
+                    "Re-run with --hard-refresh to delete and rebuild the layout-skill indexes."
+                ) from exc
+            raise
+
     def _run_indexer_with_backoff(self, *, indexer_name: str, max_wait_seconds: float = 5.0) -> None:
         """Run indexer with bounded exponential backoff for transient 409 conflicts."""
         start = time.time()
@@ -138,7 +229,9 @@ class DocumentLayoutSkillService:
 
         while True:
             try:
+                self._log(f"Starting indexer '{indexer_name}'")
                 self._search_request("POST", f"/indexers/{quote(indexer_name)}/run")
+                self._log(f"Indexer '{indexer_name}' accepted run request")
                 return
             except SearchApiError as exc:
                 detail = (exc.detail or "").lower()
@@ -163,6 +256,10 @@ class DocumentLayoutSkillService:
                     ) from exc
 
                 delay = min(0.5 * (2**attempt), remaining)
+                self._log(
+                    f"Indexer '{indexer_name}' is busy; retrying in {delay:.1f}s "
+                    f"(attempt {attempt + 1})"
+                )
                 time.sleep(delay)
                 attempt += 1
 
@@ -240,6 +337,12 @@ class DocumentLayoutSkillService:
             last = status
             last_result = status.get("lastResult") or {}
             state = (last_result.get("status") or "").lower()
+            execution_status = status.get("status") or "unknown"
+            print(
+                "[document-layout-skill] "
+                f"Indexer status: execution={execution_status} result={state or 'pending'}",
+                flush=True,
+            )
             if state in {"success", "transientfailure", "persistentfailure", "reset"}:
                 if state != "success":
                     errors = last_result.get("errors") or []
@@ -259,6 +362,7 @@ class DocumentLayoutSkillService:
         chunk_overlap: int = 200,
         hard_refresh: bool = True,
     ) -> Dict[str, Any]:
+        self._log(f"Run started for source '{src}'")
         safe_prefix = self._slug(name_prefix)
         text_index_name = f"{safe_prefix}-chunks"
         image_index_name = f"{safe_prefix}-images"
@@ -267,6 +371,7 @@ class DocumentLayoutSkillService:
         indexer_name = f"{safe_prefix}-indexer"
 
         if hard_refresh:
+            self._log("Hard refresh enabled; deleting existing search objects and storage container")
             self._search_delete_if_exists(f"/indexers/{quote(indexer_name)}")
             self._search_delete_if_exists(f"/skillsets/{quote(skillset_name)}")
             self._search_delete_if_exists(f"/datasources/{quote(datasource_name)}")
@@ -274,9 +379,12 @@ class DocumentLayoutSkillService:
             self._search_delete_if_exists(f"/indexes/{quote(image_index_name)}")
             self.storage_service.delete_container_if_exists(input_container)
 
+        self._log(f"Ensuring storage container '{input_container}' exists")
         self.storage_service.ensure_container(input_container)
 
+        self._log("Loading source document")
         source_bytes, source_filename = self._load_source_bytes(src)
+        effective_chunk_size = self._effective_chunk_size(chunk_size)
         source_id = self._source_identity(src)
         blob_prefix = f"source_files/{source_id}"
         blob_name = f"{blob_prefix}/{source_filename}"
@@ -285,10 +393,12 @@ class DocumentLayoutSkillService:
             container_name=input_container,
             blob_name=blob_name,
         )
+
         if not self.storage_service.blob_exists(
             container_name=input_container,
             blob_name=blob_name,
         ):
+            self._log(f"Uploading source blob '{blob_name}'")
             content_type = mimetypes.guess_type(source_filename)[0] or "application/octet-stream"
             source_blob_url = self.storage_service.upload_bytes(
                 container_name=input_container,
@@ -297,12 +407,15 @@ class DocumentLayoutSkillService:
                 content_type=content_type,
                 overwrite=False,
             )
+        else:
+            self._log(f"Source blob already exists at '{blob_name}'")
 
         connection_string = self._build_connection_string(
             self.storage_blob_endpoint,
             self.storage_blob_api_key,
         )
 
+        self._log(f"Creating or updating datasource '{datasource_name}'")
         self._search_request(
             "PUT",
             f"/datasources/{quote(datasource_name)}",
@@ -314,11 +427,12 @@ class DocumentLayoutSkillService:
             },
         )
 
-        self._search_request(
-            "PUT",
-            f"/indexes/{quote(text_index_name)}",
-            {
+        self._create_or_update_index(
+            index_name=text_index_name,
+            hard_refresh=hard_refresh,
+            body={
                 "name": text_index_name,
+                "vectorSearch": self._vector_search_config(),
                 "fields": [
                     {"name": "chunk_id", "type": "Edm.String", "key": True, "searchable": True, "analyzer": "keyword", "filterable": True, "retrievable": True},
                     {"name": "parent_id", "type": "Edm.String", "searchable": False, "filterable": True, "retrievable": True},
@@ -326,14 +440,15 @@ class DocumentLayoutSkillService:
                     {"name": "chunk", "type": "Edm.String", "searchable": True, "retrievable": True},
                     {"name": "page_number", "type": "Edm.Int32", "searchable": False, "filterable": True, "sortable": True, "retrievable": True},
                     {"name": "ordinal_position", "type": "Edm.Int32", "searchable": False, "filterable": True, "sortable": True, "retrievable": True},
+                    {"name": TEXT_VECTOR_FIELD_NAME, "type": "Collection(Edm.Single)", "searchable": True, "retrievable": True, "dimensions": self.embedding_dimensions, "vectorSearchProfile": VECTOR_PROFILE_NAME},
                 ],
             },
         )
 
-        self._search_request(
-            "PUT",
-            f"/indexes/{quote(image_index_name)}",
-            {
+        self._create_or_update_index(
+            index_name=image_index_name,
+            hard_refresh=hard_refresh,
+            body={
                 "name": image_index_name,
                 "fields": [
                     {"name": "image_id", "type": "Edm.String", "key": True, "searchable": True, "analyzer": "keyword", "filterable": True, "retrievable": True},
@@ -342,16 +457,19 @@ class DocumentLayoutSkillService:
                     {"name": "image_path", "type": "Edm.String", "searchable": False, "filterable": True, "retrievable": True},
                     {"name": "page_number", "type": "Edm.Int32", "searchable": False, "filterable": True, "sortable": True, "retrievable": True},
                     {"name": "ordinal_position", "type": "Edm.Int32", "searchable": False, "filterable": True, "sortable": True, "retrievable": True},
+                    {"name": IMAGE_VECTOR_FIELD_NAME, "type": "Collection(Edm.Single)", "searchable": True, "retrievable": True, "dimensions": self.embedding_dimensions, "vectorSearchProfile": VECTOR_PROFILE_NAME},
                 ],
+                "vectorSearch": self._vector_search_config(),
             },
         )
 
+        self._log(f"Creating or updating skillset '{skillset_name}'")
         self._search_request(
             "PUT",
             f"/skillsets/{quote(skillset_name)}",
             {
                 "name": skillset_name,
-                "description": "Layout skillset for text and image extraction.",
+                "description": "Layout skillset for multimodal text and image extraction and vectorization.",
                 "skills": [
                     {
                         "@odata.type": "#Microsoft.Skills.Util.DocumentIntelligenceLayoutSkill",
@@ -363,7 +481,7 @@ class DocumentLayoutSkillService:
                         "extractionOptions": ["images", "locationMetadata"],
                         "chunkingProperties": {
                             "unit": "characters",
-                            "maximumLength": max(200, int(chunk_size)),
+                            "maximumLength": effective_chunk_size,
                             "overlapLength": max(0, int(chunk_overlap)),
                         },
                         "inputs": [
@@ -373,8 +491,39 @@ class DocumentLayoutSkillService:
                             {"name": "text_sections", "targetName": "text_sections"},
                             {"name": "normalized_images", "targetName": "normalized_images"},
                         ],
+                    },
+                    {
+                        "@odata.type": "#Microsoft.Skills.Vision.VectorizeSkill",
+                        "name": TEXT_EMBEDDING_SKILL_NAME,
+                        "description": "Generate multimodal text embeddings for each extracted text section.",
+                        "context": "/document/text_sections/*",
+                        "modelVersion": self.ai_vision_model_version,
+                        "inputs": [
+                            {"name": "text", "source": "/document/text_sections/*/content"},
+                        ],
+                        "outputs": [
+                            {"name": "vector", "targetName": TEXT_VECTOR_FIELD_NAME},
+                        ],
+                    },
+                    {
+                        "@odata.type": "#Microsoft.Skills.Vision.VectorizeSkill",
+                        "name": IMAGE_EMBEDDING_SKILL_NAME,
+                        "description": "Generate multimodal image embeddings for each extracted image.",
+                        "context": "/document/normalized_images/*",
+                        "modelVersion": self.ai_vision_model_version,
+                        "inputs": [
+                            {"name": "image", "source": "/document/normalized_images/*"},
+                        ],
+                        "outputs": [
+                            {"name": "vector", "targetName": IMAGE_VECTOR_FIELD_NAME},
+                        ],
                     }
                 ],
+                "cognitiveServices": {
+                    "@odata.type": "#Microsoft.Azure.Search.AIServicesByKey",
+                    "subdomainUrl": self.foundry_resource_uri,
+                    "key": self.foundry_api_key,
+                },
                 "indexProjections": {
                     "selectors": [
                         {
@@ -386,6 +535,7 @@ class DocumentLayoutSkillService:
                                 {"name": "source_path", "source": "/document/metadata_storage_path"},
                                 {"name": "page_number", "source": "/document/text_sections/*/locationMetadata/pageNumber"},
                                 {"name": "ordinal_position", "source": "/document/text_sections/*/locationMetadata/ordinalPosition"},
+                                {"name": TEXT_VECTOR_FIELD_NAME, "source": f"/document/text_sections/*/{TEXT_VECTOR_FIELD_NAME}"},
                             ],
                         },
                         {
@@ -397,6 +547,7 @@ class DocumentLayoutSkillService:
                                 {"name": "source_path", "source": "/document/metadata_storage_path"},
                                 {"name": "page_number", "source": "/document/normalized_images/*/locationMetadata/pageNumber"},
                                 {"name": "ordinal_position", "source": "/document/normalized_images/*/locationMetadata/ordinalPosition"},
+                                {"name": IMAGE_VECTOR_FIELD_NAME, "source": f"/document/normalized_images/*/{IMAGE_VECTOR_FIELD_NAME}"},
                             ],
                         },
                     ],
@@ -418,6 +569,7 @@ class DocumentLayoutSkillService:
             },
         )
 
+        self._log(f"Creating or updating indexer '{indexer_name}'")
         self._search_request(
             "PUT",
             f"/indexers/{quote(indexer_name)}",
@@ -436,12 +588,15 @@ class DocumentLayoutSkillService:
 
         self._run_indexer_with_backoff(indexer_name=indexer_name, max_wait_seconds=5.0)
 
+        self._log(f"Waiting for indexer '{indexer_name}' to finish")
         status = self._wait_for_indexer(
             lambda: self._search_request("GET", f"/indexers/{quote(indexer_name)}/status")
         )
+        self._log(f"Indexer '{indexer_name}' completed successfully")
 
         escaped_source_blob_url = source_blob_url.replace("'", "''")
         source_filter = f"source_path eq '{escaped_source_blob_url}'"
+        self._log("Fetching indexed chunks")
         chunks = self._search_request(
             "POST",
             f"/indexes/{quote(text_index_name)}/docs/search",
@@ -449,11 +604,12 @@ class DocumentLayoutSkillService:
                 "search": "*",
                 "filter": source_filter,
                 "top": 1000,
-                "select": "chunk_id,parent_id,source_path,chunk,page_number,ordinal_position",
+                "select": f"chunk_id,parent_id,source_path,chunk,page_number,ordinal_position,{TEXT_VECTOR_FIELD_NAME}",
                 "orderby": "ordinal_position asc",
             },
         ).get("value", [])
 
+        self._log("Fetching indexed images")
         images = self._search_request(
             "POST",
             f"/indexes/{quote(image_index_name)}/docs/search",
@@ -461,10 +617,11 @@ class DocumentLayoutSkillService:
                 "search": "*",
                 "filter": source_filter,
                 "top": 1000,
-                "select": "image_id,parent_id,source_path,image_path,page_number,ordinal_position",
+                "select": f"image_id,parent_id,source_path,image_path,page_number,ordinal_position,{IMAGE_VECTOR_FIELD_NAME}",
                 "orderby": "ordinal_position asc",
             },
         ).get("value", [])
+        self._log(f"Run finished with {len(chunks)} chunks and {len(images)} images")
 
         return {
             "pipeline": "document-layout-skill",
@@ -479,6 +636,14 @@ class DocumentLayoutSkillService:
                 "indexer": indexer_name,
             },
             "status": status.get("lastResult", {}),
+            "embeddings": {
+                "mode": "skillset-native-multimodal",
+                "text_field": TEXT_VECTOR_FIELD_NAME,
+                "image_field": IMAGE_VECTOR_FIELD_NAME,
+                "resource_uri": self.foundry_resource_uri,
+                "model_version": self.ai_vision_model_version,
+                "dimensions": self.embedding_dimensions,
+            },
             "chunks": chunks,
             "images": images,
         }

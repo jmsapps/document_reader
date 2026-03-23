@@ -157,12 +157,14 @@ def main() -> int:
         return 3
 
     container = "data"
+
     if args.out:
         filename = args.out
     elif pipeline_name == "layout-skill":
         filename = _default_layout_output_path(args.src)
     else:
         filename = _default_output_path(args.src, args.content_format)
+
     config = get_config()
     storage_blob_endpoint = config.get("storage_blob_endpoint")
     storage_blob_api_key = config.get("storage_blob_api_key")
