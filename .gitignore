@@ -30,7 +30,7 @@ wheels/
 *.egg
 MANIFEST
 
-documents/*
+local_documents/*
 data/*
 .env
 
@@ -38,3 +38,4 @@ AGENTS.md
 index.html
 
 **/*/SKILL.md
+.codex-notes/

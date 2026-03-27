@@ -1,9 +1,10 @@
 # Document Reader
 
-Python CLI for two document-processing flows:
+Python CLI for three document-processing flows:
 
 - `direct`: call Azure Document Intelligence directly and save structured output
 - `layout-skill`: run an Azure AI Search pull indexer pipeline using `DocumentIntelligenceLayoutSkill` plus multimodal vectorization for text and images
+- `layout-skill-v2`: proof-of-concept one-index flow that derives chunk JSON per source and uploads records directly into one Azure AI Search target index
 
 ## Setup
 
@@ -45,6 +46,18 @@ Outputs created by the pipeline:
 
 This path uses a Foundry-backed multimodal configuration and the Azure AI Search preview API.
 
+### `layout-skill-v2`
+
+Uses an upstream-enrichment proof-of-concept flow:
+
+- local demo files are processed source by source
+- per-source derived JSON artifacts are written into `chunk-container`
+- JSON input is chunked to simulate the current ingestion style
+- PDF input is analyzed with Document Intelligence for text and figure metadata
+- Azure AI Vision multimodal vectors are added during enrichment
+- all normalized records are uploaded into one final Azure AI Search index
+- the shared one-index schema uses `content` and `contentVector`
+
 ## Environment
 
 ### Required for `direct`
@@ -80,6 +93,26 @@ Notes:
 - `AZURE_AI_VISION_MODEL_VERSION` defaults to `2023-04-15`.
 - `AZURE_AI_VISION_EMBEDDING_DIMENSIONS` defaults to `1024`.
 - The multimodal path is billable.
+
+### Required for `layout-skill-v2`
+
+```env
+AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT=https://<doc-intelligence>.cognitiveservices.azure.com/
+AZURE_DOCUMENT_INTELLIGENCE_API_KEY=<doc-intelligence-key>
+
+AZURE_AI_SEARCH_ENDPOINT=https://<search-service>.search.windows.net
+AZURE_AI_SEARCH_API_KEY=<search-admin-key>
+
+AZURE_STORAGE_BLOB_ENDPOINT=https://<storage-account>.blob.core.windows.net
+AZURE_STORAGE_BLOB_API_KEY=<storage-account-key>
+```
+
+Notes:
+
+- If blob storage is configured, derived artifacts are written to `chunk-container`.
+- If blob storage is not configured, derived artifacts fall back to `local_documents/chunk-container/`.
+- PDF and image processing in v2 requires blob storage so image/source URLs stay navigable.
+- V2 expects real embedding configuration through `AZURE_EMBEDDING_PROVIDER` and currently supports `azure_ai_vision`.
 
 ## Run
 
@@ -138,6 +171,40 @@ Notes:
 - Use `--hard-refresh` when changing index schema or skillset shape.
 - The layout-skill path now caps chunk size for multimodal text vectorization safety. If you pass a larger `--chunk-size`, the service logs that it is reducing it.
 
+### Layout-skill-v2 pipeline
+
+Run the demo flow across the current demo assets:
+
+```bash
+python document_reader.py \
+  --pipeline layout-skill-v2 \
+  --demo \
+  --hard-refresh
+```
+
+Run v2 against a single source:
+
+```bash
+python document_reader.py \
+  --pipeline layout-skill-v2 \
+  --src ./documents/layout_skill_demo/upload_file.json \
+  --hard-refresh
+```
+
+Useful options:
+
+```bash
+python document_reader.py \
+  --pipeline layout-skill-v2 \
+  --demo \
+  --chunk-container chunk-container \
+  --name-prefix document-layout-v2 \
+  --chunk-size 500 \
+  --chunk-overlap 50 \
+  --hard-refresh
+```
+
+
 ## Progress Logs
 
 The `layout-skill` pipeline prints progress to stdout, including:
@@ -165,6 +232,7 @@ Default object names:
 
 - `direct`: `data/<content_format>/<content_format>_<input_name>.json`
 - `layout-skill`: `data/layout-skill/layout-skill_<input_name>.json`
+- `layout-skill-v2`: `data/layout-skill-v2/layout-skill-v2_<input_name>.json` or `data/layout-skill-v2/layout-skill-v2_demo.json`
 
 You can override the output path with:
 

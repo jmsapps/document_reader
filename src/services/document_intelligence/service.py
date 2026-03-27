@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any
 
 from azure.ai.documentintelligence import DocumentIntelligenceClient
-from azure.ai.documentintelligence.models import DocumentContentFormat
+from azure.ai.documentintelligence.models import AnalyzeOutputOption, DocumentContentFormat
 from azure.core.credentials import AzureKeyCredential
 
 from src.auth.iam import IAM
@@ -65,3 +65,25 @@ class DocumentIntelligenceService:
             data = f.read()
 
         return self.analyze_bytes(data=data, model_id=model_id, content_format=content_format)
+
+    def analyze_file_with_figures(
+        self,
+        path: Path,
+        model_id: str = "prebuilt-layout",
+        content_format: DocumentContentFormat = DocumentContentFormat.TEXT,
+    ) -> tuple[Any, str | None]:
+        with path.open("rb") as f:
+            poller = self.client.begin_analyze_document(
+                model_id=model_id,
+                body=f,
+                output_content_format=content_format,
+                output=[AnalyzeOutputOption.FIGURES],
+            )
+
+        result = poller.result()
+        operation_id = None
+        if hasattr(poller, "details"):
+            details = getattr(poller, "details") or {}
+            if isinstance(details, dict):
+                operation_id = details.get("operation_id")
+        return result, operation_id

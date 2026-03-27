@@ -1,0 +1,12 @@
+{
+	"id": 1,
+	"metadata": {
+		"source_type": "text",
+		"category": "product-overview",
+		"topic": "document intelligence",
+		"subtopic": "service overview and capabilities",
+		"source_url": "https://learn.microsoft.com/en-us/azure/ai-services/document-intelligence/overview?view=doc-intel-4.0.0",
+		"source_url_text": "Azure AI Document Intelligence overview"
+	},
+	"content": "Azure AI Document Intelligence is a cloud-based AI service that uses machine learning to extract text, key-value pairs, tables, and document structure from files such as PDFs, images, Word documents, Excel workbooks, and PowerPoint presentations. The service includes prebuilt models, custom extraction options, layout analysis, figure detection, and tools for building document processing workflows that feed downstream search, automation, and retrieval systems."
+}

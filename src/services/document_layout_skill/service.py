@@ -33,7 +33,7 @@ class SearchApiError(ValueError):
         self.path = path
         self.status_code = status_code
         self.detail = detail
-        status_text = f"status={status_code} " if status_code is not None else ""
+        status_text = f"status={status_code}" if status_code is not None else ""
         super().__init__(f"Search API {method} {path} failed: {status_text} detail={detail}")
 
 

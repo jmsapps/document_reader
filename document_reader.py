@@ -10,6 +10,8 @@ from src.pipelines import (
     DirectPipelineOptions,
     LayoutSkillPipeline,
     LayoutSkillPipelineOptions,
+    LayoutSkillV2Pipeline,
+    LayoutSkillV2PipelineOptions,
     PipelineName,
 )
 from src.services.storage_account import AzureStorageAccountService
@@ -40,14 +42,30 @@ def _default_layout_output_path(src: str) -> str:
     return f"layout-skill/layout-skill_{stem}.json"
 
 
+def _default_layout_v2_output_path(src: str | None, demo: bool) -> str:
+    if demo:
+        return "layout-skill-v2/layout-skill-v2_demo.json"
+
+    if not src:
+        stem = "document"
+    else:
+        parsed = urlparse(src)
+        if parsed.scheme in ("http", "https"):
+            stem = Path(parsed.path).stem or "document"
+        else:
+            stem = Path(src).stem or "document"
+
+    return f"layout-skill-v2/layout-skill-v2_{stem}.json"
+
+
 def main() -> int:
     base_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     base_parser.add_argument(
         "--pipeline",
         "-p",
-        choices=["direct", "layout-skill"],
+        choices=["direct", "layout-skill", "layout-skill-v2"],
         default="direct",
-        help="Pipeline to run. direct uses Document Intelligence SDK, layout-skill uses Azure AI Search skillset.",
+        help="Pipeline to run. direct uses Document Intelligence SDK, layout-skill uses Azure AI Search skillset, layout-skill-v2 is the one-index proof of concept.",
     )
     known_args, _ = base_parser.parse_known_args()
     pipeline_name: PipelineName = known_args.pipeline
@@ -60,7 +78,7 @@ def main() -> int:
     parser.add_argument(
         "--src",
         "-s",
-        required=True,
+        required=False,
         help="Local path or URL. Supports pdf/images/docx/pptx/xlsx/html and markdown.",
     )
     parser.add_argument(
@@ -105,6 +123,47 @@ def main() -> int:
             default=False,
             help="Delete existing Search objects and reset the input container before running.",
         )
+    elif pipeline_name == "layout-skill-v2":
+        parser.add_argument(
+            "--chunk-container",
+            "-cc",
+            default="chunk-container",
+            help="Blob container used to store derived per-source JSON artifacts for v2.",
+        )
+        parser.add_argument(
+            "--name-prefix",
+            "-np",
+            default="document-layout-v2",
+            help="Prefix for the Azure AI Search target index created by layout-skill-v2.",
+        )
+        parser.add_argument(
+            "--chunk-size",
+            "-cs",
+            type=int,
+            default=500,
+            help="Max characters per normalized chunk for layout-skill-v2.",
+        )
+        parser.add_argument(
+            "--chunk-overlap",
+            "-co",
+            type=int,
+            default=50,
+            help="Overlap in characters between adjacent layout-skill-v2 chunks.",
+        )
+        parser.add_argument(
+            "--hard-refresh",
+            "-hr",
+            dest="hard_refresh",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Delete and recreate the layout-skill-v2 target index before loading records.",
+        )
+        parser.add_argument(
+            "--demo",
+            "-d",
+            action="store_true",
+            help="Run the layout-skill-v2 demo over the files in the demo folder.",
+        )
     else:
         parser.add_argument(
             "--model",
@@ -121,12 +180,30 @@ def main() -> int:
         )
     args = parser.parse_args()
 
+    if pipeline_name != "layout-skill-v2" and not args.src:
+        parser.error("--src is required unless --pipeline layout-skill-v2 --demo is used.")
+
+    if pipeline_name == "layout-skill-v2" and not args.demo and not args.src:
+        parser.error("--src is required for layout-skill-v2 when not running --demo.")
+
     try:
         if pipeline_name == "layout-skill":
             payload = LayoutSkillPipeline().run(
                 LayoutSkillPipelineOptions(
                     src=args.src,
                     input_container=args.input_container,
+                    name_prefix=args.name_prefix,
+                    chunk_size=args.chunk_size,
+                    chunk_overlap=args.chunk_overlap,
+                    hard_refresh=args.hard_refresh,
+                )
+            )
+        elif pipeline_name == "layout-skill-v2":
+            payload = LayoutSkillV2Pipeline().run(
+                LayoutSkillV2PipelineOptions(
+                    src=args.src,
+                    demo=args.demo,
+                    chunk_container=args.chunk_container,
                     name_prefix=args.name_prefix,
                     chunk_size=args.chunk_size,
                     chunk_overlap=args.chunk_overlap,
@@ -162,6 +239,8 @@ def main() -> int:
         filename = args.out
     elif pipeline_name == "layout-skill":
         filename = _default_layout_output_path(args.src)
+    elif pipeline_name == "layout-skill-v2":
+        filename = _default_layout_v2_output_path(args.src, args.demo)
     else:
         filename = _default_output_path(args.src, args.content_format)
 

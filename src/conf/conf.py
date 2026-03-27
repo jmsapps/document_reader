@@ -10,8 +10,16 @@ class AppConfig(TypedDict):
     storage_blob_api_key: str | None
     ai_search_endpoint: str | None
     ai_search_api_key: str | None
+    embedding_provider: str | None
     foundry_endpoint: str | None
     foundry_api_key: str | None
+    openai_endpoint: str | None
+    openai_api_key: str | None
+    openai_api_version: str | None
+    openai_embedding_deployment: str | None
+    openai_embedding_dimensions: int | None
+    ai_vision_endpoint: str | None
+    ai_vision_api_key: str | None
     ai_vision_model_version: str | None
     ai_vision_embedding_dimensions: int | None
 
@@ -30,8 +38,21 @@ def get_config() -> AppConfig:
     blob_api_key = (os.getenv("AZURE_STORAGE_BLOB_API_KEY") or "").strip() or None
     ai_search_endpoint = (os.getenv("AZURE_AI_SEARCH_ENDPOINT") or "").strip() or None
     ai_search_api_key = (os.getenv("AZURE_AI_SEARCH_API_KEY") or "").strip() or None
+    embedding_provider = (os.getenv("AZURE_EMBEDDING_PROVIDER") or "").strip() or None
     foundry_endpoint = (os.getenv("AZURE_FOUNDRY_ENDPOINT") or "").strip() or None
     foundry_api_key = (os.getenv("AZURE_FOUNDRY_API_KEY") or "").strip() or None
+    openai_endpoint = (os.getenv("AZURE_OPENAI_ENDPOINT") or "").strip() or None
+    openai_api_key = (os.getenv("AZURE_OPENAI_API_KEY") or "").strip() or None
+    openai_api_version = (os.getenv("AZURE_OPENAI_API_VERSION") or "").strip() or None
+    openai_embedding_deployment = (
+        (os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT") or "").strip() or None
+    )
+    openai_embedding_dimensions_raw = (os.getenv("AZURE_OPENAI_EMBEDDING_DIMENSIONS") or "").strip()
+    openai_embedding_dimensions = (
+        int(openai_embedding_dimensions_raw) if openai_embedding_dimensions_raw else None
+    )
+    ai_vision_endpoint = (os.getenv("AZURE_AI_VISION_ENDPOINT") or "").strip() or None
+    ai_vision_api_key = (os.getenv("AZURE_AI_VISION_API_KEY") or "").strip() or None
     ai_vision_model_version = (os.getenv("AZURE_AI_VISION_MODEL_VERSION") or "").strip() or None
     ai_vision_embedding_dimensions_raw = (os.getenv("AZURE_AI_VISION_EMBEDDING_DIMENSIONS") or "").strip()
     ai_vision_embedding_dimensions = (
@@ -45,8 +66,16 @@ def get_config() -> AppConfig:
         "storage_blob_api_key": blob_api_key,
         "ai_search_endpoint": ai_search_endpoint.rstrip("/") if ai_search_endpoint else None,
         "ai_search_api_key": ai_search_api_key,
+        "embedding_provider": embedding_provider,
         "foundry_endpoint": foundry_endpoint.rstrip("/") if foundry_endpoint else None,
         "foundry_api_key": foundry_api_key,
+        "openai_endpoint": openai_endpoint.rstrip("/") if openai_endpoint else None,
+        "openai_api_key": openai_api_key,
+        "openai_api_version": openai_api_version,
+        "openai_embedding_deployment": openai_embedding_deployment,
+        "openai_embedding_dimensions": openai_embedding_dimensions,
+        "ai_vision_endpoint": ai_vision_endpoint.rstrip("/") if ai_vision_endpoint else None,
+        "ai_vision_api_key": ai_vision_api_key,
         "ai_vision_model_version": ai_vision_model_version,
         "ai_vision_embedding_dimensions": ai_vision_embedding_dimensions,
     }
