@@ -242,6 +242,29 @@ class DocumentLayoutSkillV2Service:
             raise ValueError("Azure AI Vision retrieval:vectorizeImage(stream) returned no vector.")
         return [float(value) for value in vector]
 
+    def _vision_describe_image(self, image_bytes: bytes) -> dict[str, Any]:
+        url = f"{self.ai_vision_endpoint}/vision/v3.2/analyze?visualFeatures=Description,Tags,Objects"
+        req = Request(url, data=image_bytes, method="POST")
+        req.add_header("Ocp-Apim-Subscription-Key", self.ai_vision_api_key)
+        req.add_header("Content-Type", "application/octet-stream")
+
+        try:
+            with urlopen(req, timeout=120) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            self._log(
+                "Image Analysis captioning failed; continuing without model-generated image summary. "
+                f"status={exc.code} detail={detail}"
+            )
+            return {}
+        except URLError as exc:
+            self._log(
+                "Image Analysis captioning failed; continuing without model-generated image summary. "
+                f"detail={exc}"
+            )
+            return {}
+
     def _embed_text(self, text: str) -> list[float]:
         normalized = self._searchable_text(text)
         if not normalized:
@@ -486,11 +509,15 @@ class DocumentLayoutSkillV2Service:
     def _summarize_figure(
         cls,
         *,
+        model_description: str,
+        model_tags: list[str],
         caption: str,
         page_context: str,
         figure_ocr_text: str,
     ) -> str:
-        combined = cls._searchable_text(" ".join([caption, page_context, figure_ocr_text]))
+        combined = cls._searchable_text(
+            " ".join([model_description, " ".join(model_tags), caption, page_context, figure_ocr_text])
+        )
         lower = combined.lower()
 
         visual_type = "visual"
@@ -522,14 +549,21 @@ class DocumentLayoutSkillV2Service:
 
         topic_text = ", ".join(topics[:4]) if topics else "document content"
 
+        if model_description:
+            return cls._searchable_text(
+                f"{model_description}. "
+                f"Relevant concepts: {topic_text}. "
+                f"Tags: {', '.join(model_tags[:8])}."
+            )
+
         if caption:
             return cls._searchable_text(
-                f"This image appears to be a {visual_type} about {topic_text}. "
+                f"{visual_type} about {topic_text}. "
                 f"Caption summary: {caption}."
             )
 
         return cls._searchable_text(
-            f"This image appears to be a {visual_type} about {topic_text}."
+            f"{visual_type} about {topic_text}."
         )
 
     @staticmethod
@@ -602,7 +636,21 @@ class DocumentLayoutSkillV2Service:
             page_context = " ".join(page_text.get(page_number, [])[:2])
             figure_bytes = self._extract_figure_bytes(result_id=operation_id, figure_id=figure_id)
             figure_ocr_text = self._extract_figure_text(figure_bytes)
+            analysis = self._vision_describe_image(figure_bytes)
+            description_block = analysis.get("description") or {}
+            captions = description_block.get("captions") or []
+            model_description = ""
+            if captions:
+                first_caption = captions[0] or {}
+                model_description = self._searchable_text(str(first_caption.get("text") or ""))
+            model_tags = [
+                self._searchable_text(str(tag.get("name") or ""))
+                for tag in (analysis.get("tags") or [])
+                if self._searchable_text(str(tag.get("name") or ""))
+            ]
             figure_summary = self._summarize_figure(
+                model_description=model_description,
+                model_tags=model_tags,
                 caption=caption,
                 page_context=page_context,
                 figure_ocr_text=figure_ocr_text,
@@ -618,6 +666,8 @@ class DocumentLayoutSkillV2Service:
                 f"Figure extracted from {path.name}. "
                 f"Figure id: {figure_id}. "
                 f"Page: {page_number}. "
+                f"Model description: {model_description}. "
+                f"Model tags: {', '.join(model_tags[:8])}. "
                 f"Caption: {caption}. "
                 f"Context: {page_context}. "
                 f"Image OCR: {figure_ocr_text}"

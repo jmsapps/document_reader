@@ -54,6 +54,7 @@ Uses an upstream-enrichment proof-of-concept flow:
 - per-source derived JSON artifacts are written into `chunk-container`
 - JSON input is chunked to simulate the current ingestion style
 - PDF input is analyzed with Document Intelligence for text and figure metadata
+- extracted figures are enriched with OCR plus Azure AI Vision image-analysis descriptions/tags
 - Azure AI Vision multimodal vectors are added during enrichment
 - all normalized records are uploaded into one final Azure AI Search index
 - the shared one-index schema uses `content` and `contentVector`
