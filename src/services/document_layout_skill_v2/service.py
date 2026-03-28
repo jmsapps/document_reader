@@ -50,6 +50,7 @@ class DocumentLayoutSkillV2Service:
         ai_vision_api_key = config.get("ai_vision_api_key")
         ai_vision_model_version = config.get("ai_vision_model_version") or "2023-04-15"
         ai_vision_embedding_dimensions = config.get("ai_vision_embedding_dimensions") or 1024
+        ai_vision_timeout_seconds = config.get("ai_vision_timeout_seconds") or 300
 
         if not search_endpoint:
             raise ValueError("Missing AZURE_AI_SEARCH_ENDPOINT.")
@@ -67,6 +68,7 @@ class DocumentLayoutSkillV2Service:
         self.ai_vision_api_key = ai_vision_api_key
         self.ai_vision_model_version = ai_vision_model_version
         self.embedding_dimensions = int(ai_vision_embedding_dimensions)
+        self.ai_vision_timeout_seconds = int(ai_vision_timeout_seconds)
         self.di_service = DocumentIntelligenceService()
         self.storage_service: AzureStorageAccountService | None = None
         if storage_blob_endpoint:
@@ -192,7 +194,7 @@ class DocumentLayoutSkillV2Service:
         req.add_header("Content-Type", "application/json")
 
         try:
-            with urlopen(req, timeout=120) as resp:
+            with urlopen(req, timeout=self.ai_vision_timeout_seconds) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
@@ -201,6 +203,10 @@ class DocumentLayoutSkillV2Service:
             ) from exc
         except URLError as exc:
             raise ValueError(f"Azure AI Vision {route} failed: {exc}") from exc
+        except TimeoutError as exc:
+            raise ValueError(
+                f"Azure AI Vision {route} timed out after {self.ai_vision_timeout_seconds}s."
+            ) from exc
 
         vector = body.get("vector")
         if not isinstance(vector, list) or not vector:
@@ -224,7 +230,7 @@ class DocumentLayoutSkillV2Service:
         req.add_header("Content-Type", content_type)
 
         try:
-            with urlopen(req, timeout=120) as resp:
+            with urlopen(req, timeout=self.ai_vision_timeout_seconds) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
@@ -235,6 +241,11 @@ class DocumentLayoutSkillV2Service:
         except URLError as exc:
             raise ValueError(
                 f"Azure AI Vision retrieval:vectorizeImage(stream) failed: {exc}"
+            ) from exc
+        except TimeoutError as exc:
+            raise ValueError(
+                "Azure AI Vision retrieval:vectorizeImage(stream) "
+                f"timed out after {self.ai_vision_timeout_seconds}s."
             ) from exc
 
         vector = body.get("vector")
@@ -249,7 +260,7 @@ class DocumentLayoutSkillV2Service:
         req.add_header("Content-Type", "application/octet-stream")
 
         try:
-            with urlopen(req, timeout=120) as resp:
+            with urlopen(req, timeout=self.ai_vision_timeout_seconds) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
@@ -262,6 +273,11 @@ class DocumentLayoutSkillV2Service:
             self._log(
                 "Image Analysis captioning failed; continuing without model-generated image summary. "
                 f"detail={exc}"
+            )
+            return {}
+        except TimeoutError:
+            self._log(
+                "Image Analysis captioning timed out; continuing without model-generated image summary."
             )
             return {}
 

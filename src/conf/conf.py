@@ -22,6 +22,7 @@ class AppConfig(TypedDict):
     ai_vision_api_key: str | None
     ai_vision_model_version: str | None
     ai_vision_embedding_dimensions: int | None
+    ai_vision_timeout_seconds: int | None
 
 
 def get_config() -> AppConfig:
@@ -58,6 +59,10 @@ def get_config() -> AppConfig:
     ai_vision_embedding_dimensions = (
         int(ai_vision_embedding_dimensions_raw) if ai_vision_embedding_dimensions_raw else None
     )
+    ai_vision_timeout_seconds_raw = (os.getenv("AZURE_AI_VISION_TIMEOUT_SECONDS") or "").strip()
+    ai_vision_timeout_seconds = (
+        int(ai_vision_timeout_seconds_raw) if ai_vision_timeout_seconds_raw else None
+    )
 
     return {
         "document_intelligence_endpoint": document_intelligence_endpoint.rstrip("/"),
@@ -78,4 +83,5 @@ def get_config() -> AppConfig:
         "ai_vision_api_key": ai_vision_api_key,
         "ai_vision_model_version": ai_vision_model_version,
         "ai_vision_embedding_dimensions": ai_vision_embedding_dimensions,
+        "ai_vision_timeout_seconds": ai_vision_timeout_seconds,
     }
