@@ -1,14 +1,14 @@
 from typing import Any, Dict
 
-from ..services.document_layout_skill_v2 import DocumentLayoutSkillV2Service
-from .types import LayoutSkillV2PipelineOptions
+from ..services.document_layout_no_skill import DocumentLayoutNoSkillService
+from .types import LayoutNoSkillPipelineOptions
 
 
-class LayoutSkillV2Pipeline:
+class LayoutNoSkillPipeline:
     """Proof-of-concept layout flow targeting one final index."""
 
-    def run(self, options: LayoutSkillV2PipelineOptions) -> Dict[str, Any]:
-        service = DocumentLayoutSkillV2Service()
+    def run(self, options: LayoutNoSkillPipelineOptions) -> Dict[str, Any]:
+        service = DocumentLayoutNoSkillService()
         if options.demo:
             return service.run_demo(
                 chunk_container=options.chunk_container,
@@ -28,4 +28,4 @@ class LayoutSkillV2Pipeline:
                 hard_refresh=options.hard_refresh,
             )
 
-        raise ValueError("Missing --src for layout-skill-v2 when not running --demo.")
+        raise ValueError("Missing --src for layout-no-skill when not running --demo.")

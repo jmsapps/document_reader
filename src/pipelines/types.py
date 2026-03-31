@@ -3,7 +3,7 @@ from typing import Literal
 
 from ..services.document_intelligence.extractor import ContentFormat
 
-PipelineName = Literal["direct", "layout-skill", "layout-skill-v2"]
+PipelineName = Literal["direct", "layout-skill", "layout-no-skill"]
 
 
 @dataclass(frozen=True)
@@ -24,7 +24,7 @@ class LayoutSkillPipelineOptions:
 
 
 @dataclass(frozen=True)
-class LayoutSkillV2PipelineOptions:
+class LayoutNoSkillPipelineOptions:
     src: str | None
     demo: bool
     chunk_container: str

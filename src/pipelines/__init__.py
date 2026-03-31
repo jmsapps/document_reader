@@ -1,19 +1,19 @@
 from .direct import DirectPipeline
 from .layout_skill import LayoutSkillPipeline
-from .layout_skill_v2 import LayoutSkillV2Pipeline
+from .layout_no_skill import LayoutNoSkillPipeline
 from .types import (
     DirectPipelineOptions,
+    LayoutNoSkillPipelineOptions,
     LayoutSkillPipelineOptions,
-    LayoutSkillV2PipelineOptions,
     PipelineName,
 )
 
 __all__ = [
     "DirectPipeline",
     "DirectPipelineOptions",
+    "LayoutNoSkillPipeline",
+    "LayoutNoSkillPipelineOptions",
     "LayoutSkillPipeline",
     "LayoutSkillPipelineOptions",
-    "LayoutSkillV2Pipeline",
-    "LayoutSkillV2PipelineOptions",
     "PipelineName",
 ]

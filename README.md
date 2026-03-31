@@ -4,7 +4,7 @@ Python CLI for three document-processing flows:
 
 - `direct`: call Azure Document Intelligence directly and save structured output
 - `layout-skill`: run an Azure AI Search pull indexer pipeline using `DocumentIntelligenceLayoutSkill` plus multimodal vectorization for text and images
-- `layout-skill-v2`: proof-of-concept one-index flow that derives chunk JSON per source and uploads records directly into one Azure AI Search target index
+- `layout-no-skill`: proof-of-concept one-index flow that derives chunk JSON per source and uploads records directly into one Azure AI Search target index
 
 ## Setup
 
@@ -46,7 +46,7 @@ Outputs created by the pipeline:
 
 This path uses a Foundry-backed multimodal configuration and the Azure AI Search preview API.
 
-### `layout-skill-v2`
+### `layout-no-skill`
 
 Uses an upstream-enrichment proof-of-concept flow:
 
@@ -95,7 +95,7 @@ Notes:
 - `AZURE_AI_VISION_EMBEDDING_DIMENSIONS` defaults to `1024`.
 - The multimodal path is billable.
 
-### Required for `layout-skill-v2`
+### Required for `layout-no-skill`
 
 ```env
 AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT=https://<doc-intelligence>.cognitiveservices.azure.com/
@@ -112,8 +112,8 @@ Notes:
 
 - If blob storage is configured, derived artifacts are written to `chunk-container`.
 - If blob storage is not configured, derived artifacts fall back to `local_documents/chunk-container/`.
-- PDF and image processing in v2 requires blob storage so image/source URLs stay navigable.
-- V2 expects real embedding configuration through `AZURE_EMBEDDING_PROVIDER` and currently supports `azure_ai_vision`.
+- PDF and image processing in `layout-no-skill` requires blob storage so image/source URLs stay navigable.
+- `layout-no-skill` expects real embedding configuration through `AZURE_EMBEDDING_PROVIDER` and currently supports `azure_ai_vision`.
 
 ## Run
 
@@ -172,23 +172,23 @@ Notes:
 - Use `--hard-refresh` when changing index schema or skillset shape.
 - The layout-skill path now caps chunk size for multimodal text vectorization safety. If you pass a larger `--chunk-size`, the service logs that it is reducing it.
 
-### Layout-skill-v2 pipeline
+### Layout-no-skill pipeline
 
 Run the demo flow across the current demo assets:
 
 ```bash
 python document_reader.py \
-  --pipeline layout-skill-v2 \
+  --pipeline layout-no-skill \
   --demo \
   --hard-refresh
 ```
 
-Run v2 against a single source:
+Run `layout-no-skill` against a single source:
 
 ```bash
 python document_reader.py \
-  --pipeline layout-skill-v2 \
-  --src ./documents/layout_skill_demo/upload_file.json \
+  --pipeline layout-no-skill \
+  --src ./documents/layout_no_skill_demo/upload_file.json \
   --hard-refresh
 ```
 
@@ -196,10 +196,10 @@ Useful options:
 
 ```bash
 python document_reader.py \
-  --pipeline layout-skill-v2 \
+  --pipeline layout-no-skill \
   --demo \
   --chunk-container chunk-container \
-  --name-prefix document-layout-v2 \
+  --name-prefix document-layout-no-skill \
   --chunk-size 500 \
   --chunk-overlap 50 \
   --hard-refresh
@@ -233,7 +233,7 @@ Default object names:
 
 - `direct`: `data/<content_format>/<content_format>_<input_name>.json`
 - `layout-skill`: `data/layout-skill/layout-skill_<input_name>.json`
-- `layout-skill-v2`: `data/layout-skill-v2/layout-skill-v2_<input_name>.json` or `data/layout-skill-v2/layout-skill-v2_demo.json`
+- `layout-no-skill`: `data/layout-no-skill/layout-no-skill_<input_name>.json` or `data/layout-no-skill/layout-no-skill_demo.json`
 
 You can override the output path with:
 

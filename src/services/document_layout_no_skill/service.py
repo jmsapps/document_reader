@@ -17,9 +17,9 @@ SEARCH_API_VERSION = "2024-07-01"
 VISION_API_VERSION = "2024-02-01"
 VECTOR_ALGORITHM_NAME = "vector-hnsw"
 VECTOR_PROFILE_NAME = "vector-profile"
-DEFAULT_DEMO_DIR = Path("documents/layout_skill_demo")
+DEFAULT_DEMO_DIR = Path("documents/layout_no_skill_demo")
 DEFAULT_CHUNK_CONTAINER = "chunk-container"
-DEFAULT_NAME_PREFIX = "document-layout-v2"
+DEFAULT_NAME_PREFIX = "document-layout-no-skill"
 DEFAULT_CHUNK_SIZE = 500
 DEFAULT_CHUNK_OVERLAP = 50
 
@@ -36,7 +36,7 @@ class SearchApiError(ValueError):
         super().__init__(f"Search API {method} {path} failed: {status_text} detail={detail}")
 
 
-class DocumentLayoutSkillV2Service:
+class DocumentLayoutNoSkillService:
     """Proof-of-concept layout and chunk ingestion flow targeting one final index."""
 
     def __init__(self) -> None:
@@ -80,7 +80,7 @@ class DocumentLayoutSkillV2Service:
 
     @staticmethod
     def _log(message: str) -> None:
-        print(f"[document-layout-skill-v2] {message}", flush=True)
+        print(f"[document-layout-no-skill] {message}", flush=True)
 
     @staticmethod
     def _slug(value: str) -> str:
@@ -485,7 +485,7 @@ class DocumentLayoutSkillV2Service:
     ) -> str:
         if not self.storage_service:
             raise ValueError(
-                "Blob storage is required for PDF/image processing in layout-skill-v2 so "
+                "Blob storage is required for PDF/image processing in layout-no-skill so "
                 "source URLs remain navigable and Azure AI Vision can vectorize extracted images."
             )
         return self.storage_service.upload_bytes(
@@ -774,7 +774,7 @@ class DocumentLayoutSkillV2Service:
         self._upload_records(index_name=index_name, records=records)
 
         return {
-            "pipeline": "document-layout-skill-v2",
+            "pipeline": "document-layout-no-skill",
             "mode": "single-source",
             "source": str(path),
             "chunk_container": chunk_container,
@@ -833,7 +833,7 @@ class DocumentLayoutSkillV2Service:
         self._log(f"Demo finished with {len(all_records)} indexed record(s)")
 
         return {
-            "pipeline": "document-layout-skill-v2",
+            "pipeline": "document-layout-no-skill",
             "mode": "demo",
             "demo_dir": str(demo_path),
             "chunk_container": chunk_container,
