@@ -188,7 +188,7 @@ Run `layout-no-skill` against a single source:
 ```bash
 python document_reader.py \
   --pipeline layout-no-skill \
-  --src ./documents/layout_no_skill_demo/upload_file.json \
+  --src ./documents/demo_files/upload_file.json \
   --hard-refresh
 ```
 
