@@ -16,6 +16,9 @@ class AppConfig(TypedDict):
     openai_endpoint: str | None
     openai_api_key: str | None
     openai_api_version: str | None
+    openai_chat_deployment: str | None
+    openai_interpret_deployment: str | None
+    openai_verbalization_deployment: str | None
     openai_embedding_deployment: str | None
     openai_embedding_dimensions: int | None
     ai_vision_endpoint: str | None
@@ -45,6 +48,13 @@ def get_config() -> AppConfig:
     openai_endpoint = (os.getenv("AZURE_OPENAI_ENDPOINT") or "").strip() or None
     openai_api_key = (os.getenv("AZURE_OPENAI_API_KEY") or "").strip() or None
     openai_api_version = (os.getenv("AZURE_OPENAI_API_VERSION") or "").strip() or None
+    openai_chat_deployment = (os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT") or "").strip() or None
+    openai_interpret_deployment = (
+        (os.getenv("AZURE_OPENAI_INTERPRET_DEPLOYMENT") or "").strip() or None
+    )
+    openai_verbalization_deployment = (
+        (os.getenv("AZURE_OPENAI_VERBALIZATION_DEPLOYMENT") or "").strip() or None
+    )
     openai_embedding_deployment = (
         (os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT") or "").strip() or None
     )
@@ -64,6 +74,12 @@ def get_config() -> AppConfig:
         int(ai_vision_timeout_seconds_raw) if ai_vision_timeout_seconds_raw else None
     )
 
+    if not openai_interpret_deployment:
+        openai_interpret_deployment = openai_chat_deployment
+
+    if not openai_verbalization_deployment:
+        openai_verbalization_deployment = openai_chat_deployment or openai_interpret_deployment
+
     return {
         "document_intelligence_endpoint": document_intelligence_endpoint.rstrip("/"),
         "document_intelligence_api_key": document_intelligence_api_key,
@@ -77,6 +93,9 @@ def get_config() -> AppConfig:
         "openai_endpoint": openai_endpoint.rstrip("/") if openai_endpoint else None,
         "openai_api_key": openai_api_key,
         "openai_api_version": openai_api_version,
+        "openai_chat_deployment": openai_chat_deployment,
+        "openai_interpret_deployment": openai_interpret_deployment,
+        "openai_verbalization_deployment": openai_verbalization_deployment,
         "openai_embedding_deployment": openai_embedding_deployment,
         "openai_embedding_dimensions": openai_embedding_dimensions,
         "ai_vision_endpoint": ai_vision_endpoint.rstrip("/") if ai_vision_endpoint else None,

@@ -10,6 +10,8 @@ from src.pipelines import (
     DirectPipelineOptions,
     LayoutNoSkillPipeline,
     LayoutNoSkillPipelineOptions,
+    LayoutNoSkillV2Pipeline,
+    LayoutNoSkillV2PipelineOptions,
     LayoutSkillPipeline,
     LayoutSkillPipelineOptions,
     PipelineName,
@@ -62,14 +64,30 @@ def _default_layout_no_skill_output_path(src: str | None, demo: bool) -> str:
     return f"layout-no-skill/layout-no-skill_{stem}.json"
 
 
+def _default_layout_no_skill_v2_output_path(src: str | None, demo: bool) -> str:
+    if demo:
+        return "layout-no-skill-v2/layout-no-skill-v2_demo.json"
+
+    if not src:
+        stem = "document"
+    else:
+        parsed = urlparse(src)
+        if parsed.scheme in ("http", "https"):
+            stem = _get_stem(parsed.path)
+        else:
+            stem = _get_stem(src)
+
+    return f"layout-no-skill-v2/layout-no-skill-v2_{stem}.json"
+
+
 def main() -> int:
     base_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     base_parser.add_argument(
         "--pipeline",
         "-p",
-        choices=["direct", "layout-skill", "layout-no-skill"],
+        choices=["direct", "layout-skill", "layout-no-skill", "layout-no-skill-v2"],
         default="direct",
-        help="Pipeline to run. direct uses Document Intelligence SDK, layout-skill uses Azure AI Search skillset, layout-no-skill is the one-index proof of concept.",
+        help="Pipeline to run. direct uses Document Intelligence SDK, layout-skill uses Azure AI Search skillset, layout-no-skill is the one-index proof of concept, and layout-no-skill-v2 is the grounded semantic sibling path.",
     )
     known_args, _ = base_parser.parse_known_args()
     pipeline_name: PipelineName = known_args.pipeline
@@ -133,32 +151,32 @@ def main() -> int:
             action="store_true",
             help="Run the layout-no-skill demo over the files in the demo folder.",
         )
-    elif pipeline_name == "layout-no-skill":
+    elif pipeline_name in ("layout-no-skill", "layout-no-skill-v2"):
         parser.add_argument(
             "--chunk-container",
             "-cc",
             default="chunk-container",
-            help="Blob container used to store derived per-source JSON artifacts for layout-no-skill.",
+            help="Blob container used to store derived per-source JSON artifacts for no-skill pipelines.",
         )
         parser.add_argument(
             "--name-prefix",
             "-np",
-            default="document-layout-no-skill",
-            help="Prefix for the Azure AI Search target index created by layout-no-skill.",
+            default="document-layout-no-skill" if pipeline_name == "layout-no-skill" else "document-layout-no-skill-v2",
+            help="Prefix for the Azure AI Search target index created by the selected no-skill pipeline.",
         )
         parser.add_argument(
             "--chunk-size",
             "-cs",
             type=int,
             default=500,
-            help="Max characters per normalized chunk for layout-no-skill.",
+            help="Max characters per normalized chunk for the selected no-skill pipeline.",
         )
         parser.add_argument(
             "--chunk-overlap",
             "-co",
             type=int,
             default=50,
-            help="Overlap in characters between adjacent layout-no-skill chunks.",
+            help="Overlap in characters between adjacent no-skill chunks.",
         )
         parser.add_argument(
             "--hard-refresh",
@@ -166,13 +184,13 @@ def main() -> int:
             dest="hard_refresh",
             action=argparse.BooleanOptionalAction,
             default=False,
-            help="Delete and recreate the layout-no-skill target index before loading records.",
+            help="Delete and recreate the no-skill target index before loading records.",
         )
         parser.add_argument(
             "--demo",
             "-d",
             action="store_true",
-            help="Run the layout-no-skill demo over the files in the demo folder.",
+            help="Run the selected no-skill demo over the files in the demo folder.",
         )
     else:
         parser.add_argument(
@@ -190,13 +208,13 @@ def main() -> int:
         )
     args = parser.parse_args()
 
-    if pipeline_name not in ["layout-no-skill", "layout-skill"] and not args.src:
+    if pipeline_name not in ["layout-no-skill", "layout-no-skill-v2", "layout-skill"] and not args.src:
         parser.error(
-            "--src is required unless --pipeline (layout-skill, layout-no-skill) --demo is used."
+            "--src is required unless --pipeline (layout-skill, layout-no-skill, layout-no-skill-v2) --demo is used."
         )
 
-    if pipeline_name == "layout-no-skill" and not args.demo and not args.src:
-        parser.error("--src is required for layout-no-skill when not running --demo.")
+    if pipeline_name in ("layout-no-skill", "layout-no-skill-v2") and not args.demo and not args.src:
+        parser.error("--src is required for no-skill pipelines when not running --demo.")
 
     try:
         if pipeline_name == "layout-skill":
@@ -214,6 +232,18 @@ def main() -> int:
         elif pipeline_name == "layout-no-skill":
             payload = LayoutNoSkillPipeline().run(
                 LayoutNoSkillPipelineOptions(
+                    src=args.src,
+                    demo=args.demo,
+                    chunk_container=args.chunk_container,
+                    name_prefix=args.name_prefix,
+                    chunk_size=args.chunk_size,
+                    chunk_overlap=args.chunk_overlap,
+                    hard_refresh=args.hard_refresh,
+                )
+            )
+        elif pipeline_name == "layout-no-skill-v2":
+            payload = LayoutNoSkillV2Pipeline().run(
+                LayoutNoSkillV2PipelineOptions(
                     src=args.src,
                     demo=args.demo,
                     chunk_container=args.chunk_container,
@@ -254,6 +284,8 @@ def main() -> int:
         filename = _default_layout_output_path(args.src)
     elif pipeline_name == "layout-no-skill":
         filename = _default_layout_no_skill_output_path(args.src, args.demo)
+    elif pipeline_name == "layout-no-skill-v2":
+        filename = _default_layout_no_skill_v2_output_path(args.src, args.demo)
     else:
         filename = _default_output_path(args.src, args.content_format)
 

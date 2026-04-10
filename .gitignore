@@ -33,6 +33,7 @@ MANIFEST
 local_documents/*
 data/*
 .env
+logs/*
 
 index.html
 

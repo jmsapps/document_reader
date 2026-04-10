@@ -1,10 +1,11 @@
 # Document Reader
 
-Python CLI for three document-processing flows:
+Python CLI for four document-processing flows:
 
 - `direct`: call Azure Document Intelligence directly and save structured output
 - `layout-skill`: run an Azure AI Search pull indexer pipeline using `DocumentIntelligenceLayoutSkill` plus multimodal vectorization for text and images
 - `layout-no-skill`: proof-of-concept one-index flow that derives chunk JSON per source and uploads records directly into one Azure AI Search target index
+- `layout-no-skill-v2`: sibling one-index flow that converts figures into grounded semantic markdown and embeds final text with Azure OpenAI
 
 ## Setup
 
@@ -58,6 +59,19 @@ Uses an upstream-enrichment proof-of-concept flow:
 - Azure AI Vision multimodal vectors are added during enrichment
 - all normalized records are uploaded into one final Azure AI Search index
 - the shared one-index schema uses `content` and `contentVector`
+
+### `layout-no-skill-v2`
+
+Uses the same JSON-first no-skill ingestion style with a different figure pipeline:
+
+- local demo files are processed source by source
+- per-source derived JSON artifacts are written into `chunk-container`
+- PDF input is analyzed with Document Intelligence for text and figure metadata
+- each extracted figure produces a deterministic figure-analysis payload
+- Azure OpenAI performs grounded multimodal interpretation over image plus labeled evidence
+- Azure OpenAI verbalizes the grounded interpretation into semantic markdown
+- all normalized records are uploaded into one final Azure AI Search index
+- `contentVector` is generated from Azure OpenAI text embeddings over final text content
 
 ## Environment
 
@@ -114,6 +128,33 @@ Notes:
 - If blob storage is not configured, derived artifacts fall back to `local_documents/chunk-container/`.
 - PDF and image processing in `layout-no-skill` requires blob storage so image/source URLs stay navigable.
 - `layout-no-skill` expects real embedding configuration through `AZURE_EMBEDDING_PROVIDER` and currently supports `azure_ai_vision`.
+
+### Required for `layout-no-skill-v2`
+
+```env
+AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT=https://<doc-intelligence>.cognitiveservices.azure.com/
+AZURE_DOCUMENT_INTELLIGENCE_API_KEY=<doc-intelligence-key>
+
+AZURE_AI_SEARCH_ENDPOINT=https://<search-service>.search.windows.net
+AZURE_AI_SEARCH_API_KEY=<search-admin-key>
+
+AZURE_STORAGE_BLOB_ENDPOINT=https://<storage-account>.blob.core.windows.net
+AZURE_STORAGE_BLOB_API_KEY=<storage-account-key>
+
+AZURE_OPENAI_ENDPOINT=https://<azure-openai-resource>.openai.azure.com/
+AZURE_OPENAI_API_KEY=<azure-openai-key>
+AZURE_OPENAI_API_VERSION=v1
+AZURE_OPENAI_INTERPRET_DEPLOYMENT=<chat-or-multimodal-deployment>
+AZURE_OPENAI_VERBALIZATION_DEPLOYMENT=<chat-deployment>
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT=<embedding-deployment>
+AZURE_OPENAI_EMBEDDING_DIMENSIONS=1536
+```
+
+Notes:
+
+- `layout-no-skill-v2` uses Azure OpenAI `v1` API semantics.
+- `AZURE_OPENAI_CHAT_DEPLOYMENT` remains a supported fallback for interpretation and verbalization when the purpose-specific deployment names are not set.
+- The `v2` path does not require per-deployment model-version env vars.
 
 ## Run
 
@@ -183,6 +224,44 @@ python document_reader.py \
   --hard-refresh
 ```
 
+### Layout-no-skill-v2 pipeline
+
+Run the grounded semantic demo flow across the current demo assets:
+
+```bash
+python document_reader.py \
+  --pipeline layout-no-skill-v2 \
+  --demo \
+  --hard-refresh
+```
+
+Run `layout-no-skill-v2` against a single source:
+
+```bash
+python document_reader.py \
+  --pipeline layout-no-skill-v2 \
+  --src ./documents/demo_files/upload_file.json \
+  --hard-refresh
+```
+
+Useful options:
+
+```bash
+python document_reader.py \
+  --pipeline layout-no-skill-v2 \
+  --demo \
+  --chunk-container chunk-container \
+  --name-prefix document-layout-no-skill-v2 \
+  --chunk-size 500 \
+  --chunk-overlap 50 \
+  --hard-refresh
+```
+
+Notes:
+
+- `layout-no-skill-v2` persists figure-analysis, grounded interpretation, and final markdown support artifacts independently of the indexed contract.
+- Figure-derived records in `v2` use text embeddings over semantic markdown, not image-byte embeddings.
+
 Run `layout-no-skill` against a single source:
 
 ```bash
@@ -234,6 +313,7 @@ Default object names:
 - `direct`: `data/<content_format>/<content_format>_<input_name>.json`
 - `layout-skill`: `data/layout-skill/layout-skill_<input_name>.json`
 - `layout-no-skill`: `data/layout-no-skill/layout-no-skill_<input_name>.json` or `data/layout-no-skill/layout-no-skill_demo.json`
+- `layout-no-skill-v2`: `data/layout-no-skill-v2/layout-no-skill-v2_<input_name>.json` or `data/layout-no-skill-v2/layout-no-skill-v2_demo.json`
 
 You can override the output path with:
 
