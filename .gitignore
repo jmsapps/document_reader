@@ -34,8 +34,7 @@ local_documents/*
 data/*
 .env
 
-AGENTS.md
 index.html
 
-**/*/SKILL.md
-.codex-notes/
+AGENTS.md
+.skills/

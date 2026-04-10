@@ -9,17 +9,20 @@ from urllib.request import Request, urlopen
 from azure.ai.documentintelligence.models import DocumentContentFormat
 
 from src.conf.conf import get_config
+from src.services.ai_search.service import AISearchService
 from src.services.document_intelligence.service import DocumentIntelligenceService
+from src.services.shared import (
+    DEFAULT_CHUNK_CONTAINER,
+    DEFAULT_TARGET_INDEX_NAME,
+    build_shared_index,
+)
 from src.services.storage_account import AzureStorageAccountService
 from src.storage import LocalOutputStore
 
 SEARCH_API_VERSION = "2024-07-01"
 VISION_API_VERSION = "2024-02-01"
-VECTOR_ALGORITHM_NAME = "vector-hnsw"
-VECTOR_PROFILE_NAME = "vector-profile"
 DEFAULT_DEMO_DIR = Path("documents/demo_files")
-DEFAULT_CHUNK_CONTAINER = "chunk-container"
-DEFAULT_NAME_PREFIX = "document-layout-no-skill"
+DEFAULT_NAME_PREFIX = DEFAULT_TARGET_INDEX_NAME
 DEFAULT_CHUNK_SIZE = 500
 DEFAULT_CHUNK_OVERLAP = 50
 
@@ -70,6 +73,7 @@ class DocumentLayoutNoSkillService:
         self.embedding_dimensions = int(ai_vision_embedding_dimensions)
         self.ai_vision_timeout_seconds = int(ai_vision_timeout_seconds)
         self.di_service = DocumentIntelligenceService()
+        self.ai_search_service = AISearchService()
         self.storage_service: AzureStorageAccountService | None = None
         if storage_blob_endpoint:
             self.storage_service = AzureStorageAccountService(
@@ -90,6 +94,100 @@ class DocumentLayoutNoSkillService:
     @staticmethod
     def _searchable_text(value: str) -> str:
         return re.sub(r"\s+", " ", value or "").strip()
+
+    @staticmethod
+    def _optional_text(value: Any) -> str:
+        return str(value or "").strip()
+
+    @classmethod
+    def _metadata_record(
+        cls,
+        *,
+        source_type: str,
+        category: str = "",
+        topic: str = "",
+        subtopic: str = "",
+        source_url: str = "",
+        source_url_text: str = "",
+        source_name: str = "",
+        image: dict[str, Any] | None = None,
+        page_number: int | None = None,
+        figure_id: str = "",
+        summary_method: str = "",
+        bounding_regions: list[dict[str, Any]] | None = None,
+        ocr_text: str = "",
+        caption: str = "",
+    ) -> dict[str, Any]:
+        image_metadata = image if image is not None else cls._image_metadata_record(
+            page_number=page_number,
+            figure_id=figure_id,
+            summary_method=summary_method,
+            bounding_regions=bounding_regions,
+            ocr_text=ocr_text,
+            caption=caption,
+        )
+        return {
+            "source_type": cls._optional_text(source_type) or "text",
+            "category": cls._optional_text(category),
+            "topic": cls._optional_text(topic),
+            "subtopic": cls._optional_text(subtopic),
+            "source_url": cls._optional_text(source_url),
+            "source_url_text": cls._optional_text(source_url_text),
+            "source_name": cls._optional_text(source_name),
+            "image": image_metadata or None,
+        }
+
+    @classmethod
+    def _image_metadata_record(
+        cls,
+        *,
+        page_number: int | None = None,
+        figure_id: str = "",
+        summary_method: str = "",
+        bounding_regions: list[dict[str, Any]] | None = None,
+        ocr_text: str = "",
+        caption: str = "",
+    ) -> dict[str, Any]:
+        record: dict[str, Any] = {}
+        if page_number is not None:
+            record["page_number"] = int(page_number)
+        if figure_id:
+            record["figure_id"] = cls._optional_text(figure_id)
+        if summary_method:
+            record["summary_method"] = cls._optional_text(summary_method)
+        if bounding_regions:
+            record["bounding_regions"] = bounding_regions
+        if ocr_text:
+            record["ocr_text"] = cls._optional_text(ocr_text)
+        if caption:
+            record["caption"] = cls._optional_text(caption)
+        return record
+
+    @classmethod
+    def _bounding_regions_record(cls, regions: Any) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for region in regions or []:
+            polygon_values: list[float] = []
+            polygon = getattr(region, "polygon", None) or []
+            if polygon and all(isinstance(value, (int, float)) for value in polygon):
+                polygon_values = [float(value) for value in polygon]
+            for point in polygon if not polygon_values else []:
+                x = getattr(point, "x", None)
+                y = getattr(point, "y", None)
+                if x is None and isinstance(point, (list, tuple)) and len(point) >= 2:
+                    x, y = point[0], point[1]
+                if x is None or y is None:
+                    continue
+                polygon_values.extend([float(x), float(y)])
+            record: dict[str, Any] = {}
+            page_number = getattr(region, "page_number", None)
+            if page_number is not None and polygon_values:
+                record["page_number"] = int(page_number)
+            if polygon_values:
+                record["polygon"] = polygon_values
+            if record:
+                records.append(record)
+        return records
 
     @classmethod
     def _chunk_text(cls, text: str, *, chunk_size: int, chunk_overlap: int) -> list[str]:
@@ -175,7 +273,7 @@ class DocumentLayoutNoSkillService:
             ) from exc
 
     def _target_index_name(self, name_prefix: str) -> str:
-        return self._slug(name_prefix)
+        return self._slug(DEFAULT_NAME_PREFIX)
 
     def _vision_vectorize(self, *, route: str, payload: dict[str, Any]) -> list[float]:
         if self.embedding_provider != "azure_ai_vision":
@@ -301,104 +399,9 @@ class DocumentLayoutNoSkillService:
             self._search_delete_if_exists(f"/indexes/{quote(index_name)}")
 
         self._log(f"Creating or updating index '{index_name}'")
-        self._search_request(
-            "PUT",
-            f"/indexes/{quote(index_name)}",
-            {
-                "name": index_name,
-                "fields": [
-                    {
-                        "name": "id",
-                        "type": "Edm.String",
-                        "key": True,
-                        "filterable": True,
-                        "retrievable": True,
-                    },
-                    {
-                        "name": "metadata",
-                        "type": "Edm.ComplexType",
-                        "fields": [
-                            {
-                                "name": "source_type",
-                                "type": "Edm.String",
-                                "searchable": True,
-                                "filterable": True,
-                                "retrievable": True,
-                                "facetable": True,
-                            },
-                            {
-                                "name": "category",
-                                "type": "Edm.String",
-                                "searchable": True,
-                                "filterable": True,
-                                "retrievable": True,
-                                "facetable": True,
-                            },
-                            {
-                                "name": "topic",
-                                "type": "Edm.String",
-                                "searchable": True,
-                                "filterable": True,
-                                "retrievable": True,
-                                "facetable": True,
-                            },
-                            {
-                                "name": "subtopic",
-                                "type": "Edm.String",
-                                "searchable": True,
-                                "filterable": True,
-                                "retrievable": True,
-                                "facetable": True,
-                            },
-                            {
-                                "name": "source_url",
-                                "type": "Edm.String",
-                                "searchable": False,
-                                "filterable": True,
-                                "retrievable": True,
-                            },
-                            {
-                                "name": "source_url_text",
-                                "type": "Edm.String",
-                                "searchable": True,
-                                "filterable": True,
-                                "retrievable": True,
-                            },
-                        ],
-                    },
-                    {
-                        "name": "content",
-                        "type": "Edm.String",
-                        "searchable": True,
-                        "retrievable": True,
-                    },
-                    {
-                        "name": "contentVector",
-                        "type": "Collection(Edm.Single)",
-                        "searchable": True,
-                        "retrievable": True,
-                        "dimensions": self.embedding_dimensions,
-                        "vectorSearchProfile": VECTOR_PROFILE_NAME,
-                    },
-                ],
-                "vectorSearch": {
-                    "algorithms": [
-                        {
-                            "name": VECTOR_ALGORITHM_NAME,
-                            "kind": "hnsw",
-                            "hnswParameters": {
-                                "metric": "cosine",
-                            },
-                        }
-                    ],
-                    "profiles": [
-                        {
-                            "name": VECTOR_PROFILE_NAME,
-                            "algorithm": VECTOR_ALGORITHM_NAME,
-                        }
-                    ],
-                },
-            },
+        search_index_client = self.ai_search_service.get_search_index_client()
+        search_index_client.create_or_update_index(
+            build_shared_index(name=index_name, embedding_dimensions=self.embedding_dimensions)
         )
 
     def _upload_records(self, *, index_name: str, records: list[dict[str, Any]]) -> None:
@@ -436,16 +439,28 @@ class DocumentLayoutNoSkillService:
         return sorted(files)
 
     @staticmethod
-    def _metadata_from_payload(payload: dict[str, Any], source_name: str) -> dict[str, str]:
+    def _metadata_from_payload(payload: dict[str, Any], source_name: str) -> dict[str, Any]:
         metadata = payload.get("metadata") or {}
-        return {
-            "source_type": str(metadata.get("source_type") or "text"),
-            "category": str(metadata.get("category") or ""),
-            "topic": str(metadata.get("topic") or ""),
-            "subtopic": str(metadata.get("subtopic") or ""),
-            "source_url": str(metadata.get("source_url") or source_name),
-            "source_url_text": str(metadata.get("source_url_text") or source_name),
-        }
+        image_metadata = metadata.get("image") or {}
+        return DocumentLayoutNoSkillService._metadata_record(
+            source_type=str(metadata.get("source_type") or "text"),
+            category=str(metadata.get("category") or ""),
+            topic=str(metadata.get("topic") or ""),
+            subtopic=str(metadata.get("subtopic") or ""),
+            source_url=str(metadata.get("source_url") or source_name),
+            source_url_text=str(metadata.get("source_url_text") or source_name),
+            source_name=str(metadata.get("source_name") or source_name),
+            image=DocumentLayoutNoSkillService._image_metadata_record(
+                page_number=image_metadata.get("page_number", metadata.get("page_number")),
+                figure_id=str(image_metadata.get("figure_id") or metadata.get("figure_id") or ""),
+                summary_method=str(
+                    image_metadata.get("summary_method") or metadata.get("summary_method") or ""
+                ),
+                bounding_regions=image_metadata.get("bounding_regions") or [],
+                ocr_text=str(image_metadata.get("ocr_text") or ""),
+                caption=str(image_metadata.get("caption") or ""),
+            ),
+        )
 
     def _json_records(
         self,
@@ -582,6 +597,51 @@ class DocumentLayoutNoSkillService:
             f"{visual_type} about {topic_text}."
         )
 
+    @classmethod
+    def _image_markdown(
+        cls,
+        *,
+        source_name: str,
+        page_number: int,
+        figure_id: str,
+        figure_summary: str,
+        summary_method: str,
+        caption: str,
+        model_description: str,
+        model_tags: list[str],
+        page_context: str,
+        figure_ocr_text: str,
+    ) -> str:
+        lines = [
+            f"# Image Summary: {source_name}",
+            "",
+            "## Figure Metadata",
+            f"- Figure ID: {figure_id}",
+            f"- Page Number: {page_number}",
+            f"- Summary Method: {summary_method or 'unspecified'}",
+        ]
+        if caption:
+            lines.append(f"- Caption: {caption}")
+        if model_tags:
+            lines.append(f"- Vision Tags: {', '.join(model_tags[:8])}")
+
+        lines.extend(
+            [
+                "",
+                "## Summary",
+                figure_summary or "No summary available.",
+            ]
+        )
+
+        if model_description:
+            lines.extend(["", "## Vision Description", model_description])
+        if page_context:
+            lines.extend(["", "## Nearby Context", page_context])
+        if figure_ocr_text:
+            lines.extend(["", "## OCR Text", figure_ocr_text])
+
+        return "\n".join(lines).strip()
+
     @staticmethod
     def _page_number_from_regions(item: Any) -> int | None:
         regions = getattr(item, "bounding_regions", None) or []
@@ -606,14 +666,16 @@ class DocumentLayoutNoSkillService:
         )
         source_name = path.stem
         source_url = self._pdf_source_url(chunk_container=chunk_container, path=path)
-        metadata = {
-            "source_type": "text",
-            "category": "document-layout-demo",
-            "topic": "layout extraction",
-            "subtopic": "pdf text and figures",
-            "source_url": source_url,
-            "source_url_text": path.name,
-        }
+        metadata = self._metadata_record(
+            source_type="text",
+            category="document-layout-demo",
+            topic="layout extraction",
+            subtopic="pdf text and figures",
+            source_url=source_url,
+            source_url_text=path.name,
+            source_name=path.name,
+            summary_method="document_text",
+        )
 
         page_text: dict[int, list[str]] = {}
         for paragraph in getattr(result, "paragraphs", None) or []:
@@ -635,7 +697,10 @@ class DocumentLayoutNoSkillService:
                 records.append(
                     {
                         "id": self._make_record_id(source_name, "text", ordinal),
-                        "metadata": dict(metadata),
+                        "metadata": {
+                            **metadata,
+                            "image": self._image_metadata_record(page_number=page_number),
+                        },
                         "content": f"Page {page_number}: {chunk}",
                         "contentVector": self._embed_text(chunk),
                     }
@@ -652,6 +717,7 @@ class DocumentLayoutNoSkillService:
             page_context = " ".join(page_text.get(page_number, [])[:2])
             figure_bytes = self._extract_figure_bytes(result_id=operation_id, figure_id=figure_id)
             figure_ocr_text = self._extract_figure_text(figure_bytes)
+            bounding_regions = self._bounding_regions_record(getattr(figure, "bounding_regions", None))
             analysis = self._vision_describe_image(figure_bytes)
             description_block = analysis.get("description") or {}
             captions = description_block.get("captions") or []
@@ -671,34 +737,45 @@ class DocumentLayoutNoSkillService:
                 page_context=page_context,
                 figure_ocr_text=figure_ocr_text,
             )
+            summary_method = "vision_description+ocr+context"
             figure_url = self._write_binary_artifact(
                 container_name=chunk_container,
                 blob_name=f"figures/{source_name}/{figure_id}.png",
                 data=figure_bytes,
                 content_type="image/png",
             )
-            figure_text = self._searchable_text(
-                f"Image summary: {figure_summary}. "
-                f"Figure extracted from {path.name}. "
-                f"Figure id: {figure_id}. "
-                f"Page: {page_number}. "
-                f"Model description: {model_description}. "
-                f"Model tags: {', '.join(model_tags[:8])}. "
-                f"Caption: {caption}. "
-                f"Context: {page_context}. "
-                f"Image OCR: {figure_ocr_text}"
+            figure_text = self._image_markdown(
+                source_name=path.name,
+                page_number=page_number,
+                figure_id=figure_id,
+                figure_summary=figure_summary,
+                summary_method=summary_method,
+                caption=caption,
+                model_description=model_description,
+                model_tags=model_tags,
+                page_context=page_context,
+                figure_ocr_text=figure_ocr_text,
             )
             if not figure_text:
                 continue
             records.append(
                 {
                     "id": self._make_record_id(source_name, "image", ordinal),
-                    "metadata": {
-                        **metadata,
-                        "source_type": "image",
-                        "source_url": figure_url,
-                        "source_url_text": f"{path.name} figure {figure_id}",
-                    },
+                    "metadata": self._metadata_record(
+                        source_type="image",
+                        category=metadata["category"],
+                        topic=metadata["topic"],
+                        subtopic=metadata["subtopic"],
+                        source_url=figure_url,
+                        source_url_text=f"{path.name} figure {figure_id}",
+                        source_name=path.name,
+                        page_number=page_number,
+                        figure_id=figure_id,
+                        summary_method=summary_method,
+                        bounding_regions=bounding_regions,
+                        ocr_text=figure_ocr_text,
+                        caption=caption,
+                    ),
                     "content": figure_text,
                     "contentVector": self._embed_image_bytes(figure_bytes, content_type="image/png"),
                 }

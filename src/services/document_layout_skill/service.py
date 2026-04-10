@@ -10,14 +10,27 @@ from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 from src.conf.conf import get_config
+from src.services.ai_search.service import AISearchService
+from src.services.shared import (
+    DEFAULT_CHUNK_CONTAINER,
+    DEFAULT_DATASOURCE_NAME,
+    DEFAULT_INDEXER_NAME,
+    DEFAULT_SKILLSET_NAME,
+    DEFAULT_TARGET_INDEX_NAME,
+    VECTOR_ALGORITHM_NAME,
+    VECTOR_PROFILE_NAME,
+    build_shared_index,
+)
 from src.services.storage_account import AzureStorageAccountService
 
 SEARCH_API_VERSION = "2025-11-01-preview"
 EMBEDDING_DIMENSIONS = 1024
 AI_VISION_MODEL_VERSION = "2023-04-15"
 MAX_MULTIMODAL_TEXT_CHARS = 450
-VECTOR_ALGORITHM_NAME = "vector-hnsw"
-VECTOR_PROFILE_NAME = "vector-profile"
+DEFAULT_DEMO_DIR = Path("documents/demo_files")
+DEFAULT_INPUT_CONTAINER = DEFAULT_CHUNK_CONTAINER
+TEMP_TEXT_INDEX_NAME = "rag-index-layout-text-temp"
+TEMP_IMAGE_INDEX_NAME = "rag-index-layout-image-temp"
 VECTOR_VECTORIZER_NAME = "vision-vectorizer"
 TEXT_EMBEDDING_SKILL_NAME = "#text-vectorize"
 IMAGE_EMBEDDING_SKILL_NAME = "#image-vectorize"
@@ -72,6 +85,7 @@ class DocumentLayoutSkillService:
         self.foundry_api_key: str = foundry_api_key
         self.ai_vision_model_version: str = ai_vision_model_version
         self.embedding_dimensions: int = int(ai_vision_embedding_dimensions)
+        self.ai_search_service = AISearchService()
         self.storage_service = AzureStorageAccountService(
             endpoint=storage_blob_endpoint,
             api_key=storage_blob_api_key,
@@ -222,6 +236,110 @@ class DocumentLayoutSkillService:
                 ) from exc
             raise
 
+    def _upload_records(self, *, index_name: str, records: list[dict[str, Any]]) -> None:
+        if not records:
+            return
+        self._search_request(
+            "POST",
+            f"/indexes/{quote(index_name)}/docs/index",
+            {"value": [{"@search.action": "mergeOrUpload", **record} for record in records]},
+        )
+
+    @staticmethod
+    def _source_name_from_url(source_url: str) -> str:
+        parsed = urlparse(source_url)
+        return Path(parsed.path).name or "source"
+
+    def _normalized_image_url(self, *, image_path: str, container_name: str) -> str:
+        if image_path.startswith("http://") or image_path.startswith("https://"):
+            return image_path
+        blob_name = image_path.lstrip("/")
+        return self.storage_service.get_blob_url(container_name=container_name, blob_name=blob_name)
+
+    @staticmethod
+    def _record_id(source_url: str, record_kind: str, ordinal: int) -> str:
+        safe_source = hashlib.sha1(source_url.encode("utf-8")).hexdigest()[:12]
+        return f"{safe_source}-{record_kind}-{ordinal:04d}"
+
+    def _normalized_records(
+        self,
+        *,
+        source_blob_url: str,
+        source_filename: str,
+        chunk_docs: list[dict[str, Any]],
+        image_docs: list[dict[str, Any]],
+        input_container: str,
+    ) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        category = "document-layout-demo"
+        topic = "layout extraction"
+        subtopic = "skillset extraction"
+
+        for ordinal, chunk in enumerate(chunk_docs, start=1):
+            page_number = chunk.get("page_number")
+            image_metadata = {"page_number": page_number} if page_number is not None else None
+            records.append(
+                {
+                    "id": self._record_id(source_blob_url, "text", ordinal),
+                    "metadata": {
+                        "source_type": "text",
+                        "category": category,
+                        "topic": topic,
+                        "subtopic": subtopic,
+                        "source_url": source_blob_url,
+                        "source_url_text": source_filename,
+                        "source_name": source_filename,
+                        "image": image_metadata,
+                    },
+                    "content": str(chunk.get("chunk") or ""),
+                    "contentVector": chunk.get(TEXT_VECTOR_FIELD_NAME) or [],
+                }
+            )
+
+        image_start = len(records) + 1
+        for offset, image in enumerate(image_docs, start=image_start):
+            page_number = image.get("page_number")
+            image_path = str(image.get("image_path") or "")
+            image_url = self._normalized_image_url(image_path=image_path, container_name=input_container) if image_path else source_blob_url
+            ordinal_position = image.get("ordinal_position")
+            figure_id = str(image.get("image_id") or self._record_id(image_url, "figure", offset))
+            bounding_regions = []
+            if page_number is not None:
+                bounding_regions.append({"page_number": int(page_number)})
+            summary_method = "layout_skill_projection"
+            content = (
+                f"Extracted image from {source_filename}."
+                f" Page {page_number}." if page_number is not None else f"Extracted image from {source_filename}."
+            )
+            if ordinal_position is not None:
+                content = f"{content} Ordinal position {ordinal_position}."
+            if image_path:
+                content = f"{content} Projected image path: {image_path}."
+            records.append(
+                {
+                    "id": self._record_id(source_blob_url, "image", offset),
+                    "metadata": {
+                        "source_type": "image",
+                        "category": category,
+                        "topic": topic,
+                        "subtopic": subtopic,
+                        "source_url": image_url,
+                        "source_url_text": f"{source_filename} figure {figure_id}",
+                        "source_name": source_filename,
+                        "image": {
+                            "page_number": page_number,
+                            "figure_id": figure_id,
+                            "summary_method": summary_method,
+                            "bounding_regions": bounding_regions or None,
+                        },
+                    },
+                    "content": content.strip(),
+                    "contentVector": image.get(IMAGE_VECTOR_FIELD_NAME) or [],
+                }
+            )
+
+        return records
+
     def _run_indexer_with_backoff(self, *, indexer_name: str, max_wait_seconds: float = 5.0) -> None:
         """Run indexer with bounded exponential backoff for transient 409 conflicts."""
         start = time.time()
@@ -352,29 +470,46 @@ class DocumentLayoutSkillService:
 
         raise TimeoutError(f"Timed out waiting for indexer. Last status: {last}")
 
+    def _load_demo_files(self, demo_dir: Path) -> list[Path]:
+        if not demo_dir.exists():
+            raise FileNotFoundError(f"Demo folder not found: {demo_dir}")
+        supported_suffixes = {".pdf", ".md", ".html", ".htm"}
+        files = []
+        for path in demo_dir.iterdir():
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in supported_suffixes:
+                self._log(f"Skipping unsupported layout-skill demo source '{path.name}'")
+                continue
+            files.append(path)
+        if not files:
+            raise ValueError(f"No supported layout-skill demo files found in {demo_dir}")
+        return sorted(files)
+
     def run(
         self,
         *,
         src: str,
-        input_container: str = "layout-input",
-        name_prefix: str = "document-layout",
+        input_container: str = DEFAULT_INPUT_CONTAINER,
+        name_prefix: str = DEFAULT_TARGET_INDEX_NAME,
         chunk_size: int = 2000,
         chunk_overlap: int = 200,
         hard_refresh: bool = True,
     ) -> Dict[str, Any]:
         self._log(f"Run started for source '{src}'")
-        safe_prefix = self._slug(name_prefix)
-        text_index_name = f"{safe_prefix}-chunks"
-        image_index_name = f"{safe_prefix}-images"
-        datasource_name = f"{safe_prefix}-ds"
-        skillset_name = f"{safe_prefix}-skillset"
-        indexer_name = f"{safe_prefix}-indexer"
+        target_index_name = DEFAULT_TARGET_INDEX_NAME
+        datasource_name = DEFAULT_DATASOURCE_NAME
+        skillset_name = DEFAULT_SKILLSET_NAME
+        indexer_name = DEFAULT_INDEXER_NAME
+        text_index_name = TEMP_TEXT_INDEX_NAME
+        image_index_name = TEMP_IMAGE_INDEX_NAME
 
         if hard_refresh:
             self._log("Hard refresh enabled; deleting existing search objects and storage container")
             self._search_delete_if_exists(f"/indexers/{quote(indexer_name)}")
             self._search_delete_if_exists(f"/skillsets/{quote(skillset_name)}")
             self._search_delete_if_exists(f"/datasources/{quote(datasource_name)}")
+            self._search_delete_if_exists(f"/indexes/{quote(target_index_name)}")
             self._search_delete_if_exists(f"/indexes/{quote(text_index_name)}")
             self._search_delete_if_exists(f"/indexes/{quote(image_index_name)}")
             self.storage_service.delete_container_if_exists(input_container)
@@ -425,6 +560,10 @@ class DocumentLayoutSkillService:
                 "credentials": {"connectionString": connection_string},
                 "container": {"name": input_container, "query": blob_prefix},
             },
+        )
+
+        self.ai_search_service.get_search_index_client().create_or_update_index(
+            build_shared_index(name=target_index_name, embedding_dimensions=self.embedding_dimensions)
         )
 
         self._create_or_update_index(
@@ -621,7 +760,20 @@ class DocumentLayoutSkillService:
                 "orderby": "ordinal_position asc",
             },
         ).get("value", [])
-        self._log(f"Run finished with {len(chunks)} chunks and {len(images)} images")
+        normalized_records = self._normalized_records(
+            source_blob_url=source_blob_url,
+            source_filename=source_filename,
+            chunk_docs=chunks,
+            image_docs=images,
+            input_container=input_container,
+        )
+        self._upload_records(index_name=target_index_name, records=normalized_records)
+        self._search_delete_if_exists(f"/indexes/{quote(text_index_name)}")
+        self._search_delete_if_exists(f"/indexes/{quote(image_index_name)}")
+        self._log(
+            f"Run finished with {len(chunks)} chunks, {len(images)} images, "
+            f"and {len(normalized_records)} normalized records"
+        )
 
         return {
             "pipeline": "document-layout-skill",
@@ -630,20 +782,68 @@ class DocumentLayoutSkillService:
             "source_blob_name": self._extract_blob_name_from_url(source_blob_url),
             "objects": {
                 "datasource": datasource_name,
-                "text_index": text_index_name,
-                "image_index": image_index_name,
+                "index": target_index_name,
                 "skillset": skillset_name,
                 "indexer": indexer_name,
             },
             "status": status.get("lastResult", {}),
             "embeddings": {
                 "mode": "skillset-native-multimodal",
-                "text_field": TEXT_VECTOR_FIELD_NAME,
-                "image_field": IMAGE_VECTOR_FIELD_NAME,
+                "field": "contentVector",
                 "resource_uri": self.foundry_resource_uri,
                 "model_version": self.ai_vision_model_version,
                 "dimensions": self.embedding_dimensions,
             },
-            "chunks": chunks,
-            "images": images,
+            "records": normalized_records,
+            "record_count": len(normalized_records),
+            "chunks": [record for record in normalized_records if (record.get("metadata") or {}).get("source_type") == "text"],
+            "images": [record for record in normalized_records if (record.get("metadata") or {}).get("source_type") == "image"],
+        }
+
+    def run_demo(
+        self,
+        *,
+        demo_dir: str | Path = DEFAULT_DEMO_DIR,
+        input_container: str = DEFAULT_INPUT_CONTAINER,
+        name_prefix: str = DEFAULT_TARGET_INDEX_NAME,
+        chunk_size: int = 2000,
+        chunk_overlap: int = 200,
+        hard_refresh: bool = True,
+    ) -> Dict[str, Any]:
+        demo_path = Path(demo_dir)
+        files = self._load_demo_files(demo_path)
+        self._log(f"Processing {len(files)} demo file(s) from '{demo_path}'")
+
+        runs: list[Dict[str, Any]] = []
+        all_records: list[dict[str, Any]] = []
+        for ordinal, path in enumerate(files, start=1):
+            self._log(f"Running layout-skill demo for '{path.name}'")
+            result = self.run(
+                src=str(path),
+                input_container=input_container,
+                name_prefix=name_prefix,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                hard_refresh=hard_refresh if ordinal == 1 else False,
+            )
+            runs.append(
+                {
+                    "source": path.name,
+                    "record_count": result.get("record_count", 0),
+                    "objects": result.get("objects", {}),
+                    "status": result.get("status", {}),
+                }
+            )
+            all_records.extend(result.get("records", []))
+
+        return {
+            "pipeline": "document-layout-skill",
+            "mode": "demo",
+            "demo_dir": str(demo_path),
+            "input_container": input_container,
+            "target_index": DEFAULT_TARGET_INDEX_NAME,
+            "source_count": len(files),
+            "record_count": len(all_records),
+            "runs": runs,
+            "records": all_records,
         }

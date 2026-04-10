@@ -16,6 +16,7 @@ class DirectPipelineOptions:
 @dataclass(frozen=True)
 class LayoutSkillPipelineOptions:
     src: str
+    demo: bool
     input_container: str
     name_prefix: str
     chunk_size: int

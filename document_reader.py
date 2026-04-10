@@ -18,6 +18,10 @@ from src.services.storage_account import AzureStorageAccountService
 from src.storage import LocalOutputStore
 
 
+def _get_stem(src: str | None) -> str:
+    return Path(src).stem if src else "document"
+
+
 def _default_output_path(src: str, content_format: str) -> str:
     folder = content_format
     prefix = f"{content_format}_"
@@ -25,9 +29,9 @@ def _default_output_path(src: str, content_format: str) -> str:
 
     parsed = urlparse(src)
     if parsed.scheme in ("http", "https"):
-        stem = Path(parsed.path).stem or "document"
+        stem = _get_stem(parsed.path)
     else:
-        stem = Path(src).stem or "document"
+        stem = _get_stem(src)
 
     return f"{folder}/{prefix}{stem}{suffix}"
 
@@ -35,9 +39,9 @@ def _default_output_path(src: str, content_format: str) -> str:
 def _default_layout_output_path(src: str) -> str:
     parsed = urlparse(src)
     if parsed.scheme in ("http", "https"):
-        stem = Path(parsed.path).stem or "document"
+        stem = _get_stem(parsed.path)
     else:
-        stem = Path(src).stem or "document"
+        stem = _get_stem(src)
 
     return f"layout-skill/layout-skill_{stem}.json"
 
@@ -51,9 +55,9 @@ def _default_layout_no_skill_output_path(src: str | None, demo: bool) -> str:
     else:
         parsed = urlparse(src)
         if parsed.scheme in ("http", "https"):
-            stem = Path(parsed.path).stem or "document"
+            stem = _get_stem(parsed.path)
         else:
-            stem = Path(src).stem or "document"
+            stem = _get_stem(src)
 
     return f"layout-no-skill/layout-no-skill_{stem}.json"
 
@@ -123,6 +127,12 @@ def main() -> int:
             default=False,
             help="Delete existing Search objects and reset the input container before running.",
         )
+        parser.add_argument(
+            "--demo",
+            "-d",
+            action="store_true",
+            help="Run the layout-no-skill demo over the files in the demo folder.",
+        )
     elif pipeline_name == "layout-no-skill":
         parser.add_argument(
             "--chunk-container",
@@ -180,8 +190,10 @@ def main() -> int:
         )
     args = parser.parse_args()
 
-    if pipeline_name != "layout-no-skill" and not args.src:
-        parser.error("--src is required unless --pipeline layout-no-skill --demo is used.")
+    if pipeline_name not in ["layout-no-skill", "layout-skill"] and not args.src:
+        parser.error(
+            "--src is required unless --pipeline (layout-skill, layout-no-skill) --demo is used."
+        )
 
     if pipeline_name == "layout-no-skill" and not args.demo and not args.src:
         parser.error("--src is required for layout-no-skill when not running --demo.")
@@ -191,6 +203,7 @@ def main() -> int:
             payload = LayoutSkillPipeline().run(
                 LayoutSkillPipelineOptions(
                     src=args.src,
+                    demo=args.demo,
                     input_container=args.input_container,
                     name_prefix=args.name_prefix,
                     chunk_size=args.chunk_size,
