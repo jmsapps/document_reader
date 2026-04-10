@@ -29,6 +29,11 @@ DEFAULT_EMBEDDING_DIMENSIONS = 1536
 DEFAULT_TEXT_RECORD_CATEGORY = "document-layout-demo"
 DEFAULT_TEXT_RECORD_TOPIC = "layout extraction"
 DEFAULT_TEXT_RECORD_SUBTOPIC = "pdf text and figures"
+VERTICAL_PROXIMITY_THRESHOLD = 0.35
+CAPTION_BAND_THRESHOLD = 0.12
+MIN_HORIZONTAL_OVERLAP = 0.2
+MAX_RELEVANT_PARAGRAPHS = 2
+MAX_SURROUNDING_PARAGRAPHS = 2
 
 
 class SearchApiError(ValueError):
@@ -262,6 +267,203 @@ class DocumentLayoutNoSkillV2Service:
             if page_number is not None:
                 return int(page_number)
         return None
+
+    @staticmethod
+    def _page_dimensions_map(result: Any) -> dict[int, dict[str, float]]:
+        page_dimensions: dict[int, dict[str, float]] = {}
+        for page in getattr(result, "pages", None) or []:
+            page_number = getattr(page, "page_number", None)
+            width = getattr(page, "width", None)
+            height = getattr(page, "height", None)
+            if page_number is None or width in (None, 0) or height in (None, 0):
+                continue
+            page_dimensions[int(page_number)] = {
+                "width": float(width),
+                "height": float(height),
+            }
+        return page_dimensions
+
+    @classmethod
+    def _bbox_from_bounding_regions(
+        cls,
+        *,
+        bounding_regions: list[dict[str, Any]],
+        page_dimensions: dict[int, dict[str, float]],
+    ) -> dict[str, float] | None:
+        xs: list[float] = []
+        ys: list[float] = []
+        normalized_xs: list[float] = []
+        normalized_ys: list[float] = []
+        region_page_number: int | None = None
+
+        for region in bounding_regions:
+            page_number = region.get("page_number")
+            polygon = region.get("polygon") or []
+            if not isinstance(page_number, int) or not isinstance(polygon, list) or len(polygon) < 4:
+                continue
+            dims = page_dimensions.get(page_number)
+            if not dims:
+                continue
+            region_page_number = page_number
+            for idx in range(0, len(polygon), 2):
+                if idx + 1 >= len(polygon):
+                    break
+                x = polygon[idx]
+                y = polygon[idx + 1]
+                if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+                    continue
+                x_value = float(x)
+                y_value = float(y)
+                xs.append(x_value)
+                ys.append(y_value)
+                normalized_xs.append(x_value / dims["width"])
+                normalized_ys.append(y_value / dims["height"])
+
+        if not normalized_xs or not normalized_ys or region_page_number is None:
+            return None
+
+        left = min(normalized_xs)
+        right = max(normalized_xs)
+        top = min(normalized_ys)
+        bottom = max(normalized_ys)
+        return {
+            "page_number": float(region_page_number),
+            "left": left,
+            "right": right,
+            "top": top,
+            "bottom": bottom,
+            "center_x": (left + right) / 2,
+            "center_y": (top + bottom) / 2,
+        }
+
+    @classmethod
+    def _build_paragraph_record(
+        cls,
+        *,
+        paragraph: Any,
+        index: int,
+        page_dimensions: dict[int, dict[str, float]],
+    ) -> dict[str, Any] | None:
+        text = cls._searchable_text(getattr(paragraph, "content", "") or "")
+        if not text:
+            return None
+        bounding_regions = cls._bounding_regions_record(getattr(paragraph, "bounding_regions", None))
+        bbox = cls._bbox_from_bounding_regions(
+            bounding_regions=bounding_regions,
+            page_dimensions=page_dimensions,
+        )
+        if not bbox:
+            return None
+        page_number = int(bbox["page_number"])
+        return {
+            "text": text,
+            "page_number": page_number,
+            "index": index,
+            "bounding_regions": bounding_regions,
+            "bbox": bbox,
+            "top": bbox["top"],
+            "bottom": bbox["bottom"],
+            "left": bbox["left"],
+            "right": bbox["right"],
+            "center_x": bbox["center_x"],
+            "center_y": bbox["center_y"],
+        }
+
+    @staticmethod
+    def _normalize_figure_id(figure_id: str) -> str:
+        return re.sub(r"[^0-9]+", ".", (figure_id or "").lower()).strip(".")
+
+    @classmethod
+    def _figure_reference_patterns(cls, figure_id: str) -> list[re.Pattern[str]]:
+        normalized = cls._normalize_figure_id(figure_id)
+        if not normalized:
+            return []
+        dashed = normalized.replace(".", "-")
+        escaped_normalized = re.escape(normalized)
+        escaped_dashed = re.escape(dashed)
+        return [
+            re.compile(rf"\bfigure\s+{escaped_normalized}\b", re.IGNORECASE),
+            re.compile(rf"\bfig\.?\s*{escaped_normalized}\b", re.IGNORECASE),
+            re.compile(rf"\bfigure\s+{escaped_dashed}\b", re.IGNORECASE),
+            re.compile(rf"\bfig\.?\s*{escaped_dashed}\b", re.IGNORECASE),
+            re.compile(rf"\({escaped_normalized}\)", re.IGNORECASE),
+        ]
+
+    @classmethod
+    def _extract_figure_reference_ids(cls, text: str) -> set[str]:
+        references: set[str] = set()
+        for pattern in [
+            re.compile(r"\bfigure\s+([0-9]+(?:[.-][0-9]+)*)\b", re.IGNORECASE),
+            re.compile(r"\bfig\.?\s*([0-9]+(?:[.-][0-9]+)*)\b", re.IGNORECASE),
+            re.compile(r"\(([0-9]+(?:\.[0-9]+)+)\)", re.IGNORECASE),
+        ]:
+            for match in pattern.finditer(text):
+                references.add(cls._normalize_figure_id(match.group(1)))
+        return references
+
+    @staticmethod
+    def _horizontal_overlap_ratio(figure_bbox: dict[str, float], paragraph_bbox: dict[str, float]) -> float:
+        overlap = min(figure_bbox["right"], paragraph_bbox["right"]) - max(
+            figure_bbox["left"],
+            paragraph_bbox["left"],
+        )
+        if overlap <= 0:
+            return 0.0
+        figure_width = max(figure_bbox["right"] - figure_bbox["left"], 1e-9)
+        paragraph_width = max(paragraph_bbox["right"] - paragraph_bbox["left"], 1e-9)
+        return overlap / min(figure_width, paragraph_width)
+
+    @staticmethod
+    def _spatial_distance(figure_bbox: dict[str, float], paragraph_bbox: dict[str, float]) -> float:
+        return abs(paragraph_bbox["center_y"] - figure_bbox["center_y"])
+
+    @classmethod
+    def _is_spatial_candidate(
+        cls,
+        *,
+        figure_bbox: dict[str, float],
+        paragraph_bbox: dict[str, float],
+    ) -> bool:
+        overlap = cls._horizontal_overlap_ratio(figure_bbox, paragraph_bbox)
+        if overlap < MIN_HORIZONTAL_OVERLAP:
+            return False
+
+        vertically_near = abs(paragraph_bbox["center_y"] - figure_bbox["center_y"]) < VERTICAL_PROXIMITY_THRESHOLD
+        below_band = 0 <= paragraph_bbox["top"] - figure_bbox["bottom"] < CAPTION_BAND_THRESHOLD
+        above_band = 0 <= figure_bbox["top"] - paragraph_bbox["bottom"] < CAPTION_BAND_THRESHOLD
+        return vertically_near or below_band or above_band
+
+    @classmethod
+    def _score_paragraph_for_figure(
+        cls,
+        *,
+        paragraph_text: str,
+        figure_id: str,
+        caption_terms: list[str],
+    ) -> tuple[int, bool]:
+        lower = paragraph_text.lower()
+        score = 0
+        matched_figure = False
+
+        patterns = cls._figure_reference_patterns(figure_id)
+        if any(pattern.search(paragraph_text) for pattern in patterns):
+            score += 10
+            matched_figure = True
+
+        if caption_terms and any(term in lower for term in caption_terms):
+            score += 5
+
+        if "figure" in lower or "fig." in lower or "chart" in lower or "diagram" in lower or "table" in lower:
+            score += 1
+
+        normalized_figure_id = cls._normalize_figure_id(figure_id)
+        referenced_ids = cls._extract_figure_reference_ids(paragraph_text)
+        if referenced_ids and normalized_figure_id not in referenced_ids:
+            return -100, False
+        elif "figure" in lower and not matched_figure and normalized_figure_id:
+            score -= 5
+
+        return score, matched_figure
 
     def _search_request(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         url = f"{self.search_endpoint}{path}?api-version={SEARCH_API_VERSION}"
@@ -634,32 +836,68 @@ class DocumentLayoutNoSkillV2Service:
         *,
         figure_id: str,
         caption: str,
+        figure_bbox: dict[str, float] | None,
         page_number: int,
-        page_paragraphs: dict[int, list[str]],
+        page_paragraphs: dict[int, list[dict[str, Any]]],
     ) -> tuple[str, str]:
         same_page = page_paragraphs.get(page_number, [])
-        if not same_page:
+        candidate_count = len(same_page)
+        if not same_page or not figure_bbox:
+            self._log(
+                f"Figure '{figure_id}' has no geometry-aware paragraph candidates "
+                f"(same_page_candidates={candidate_count}, figure_bbox={bool(figure_bbox)})"
+            )
             return "", ""
 
         caption_terms = self._caption_keywords(caption)
-        scored: list[tuple[int, int, str]] = []
-        for index, paragraph in enumerate(same_page):
-            lower = paragraph.lower()
-            score = 0
-            if figure_id and figure_id.lower() in lower:
-                score += 6
-            if "figure" in lower or "chart" in lower or "diagram" in lower or "table" in lower:
-                score += 2
-            score += sum(1 for term in caption_terms if term in lower)
-            if score > 0:
-                scored.append((score, index, paragraph))
+        filtered = [
+            paragraph
+            for paragraph in same_page
+            if self._is_spatial_candidate(
+                figure_bbox=figure_bbox,
+                paragraph_bbox=paragraph["bbox"],
+            )
+        ]
+        self._log(
+            f"Figure '{figure_id}' candidate filtering "
+            f"(same_page_candidates={candidate_count}, spatial_candidates={len(filtered)})"
+        )
+        if not filtered:
+            self._log(f"Figure '{figure_id}' has no figure-local spatial context candidates")
+            return "", ""
 
-        scored.sort(key=lambda item: (-item[0], item[1]))
-        relevant = " ".join(paragraph for _, _, paragraph in scored[:3])
-        surrounding = " ".join(same_page[:3])
-        if not relevant:
-            relevant = surrounding
-            surrounding = ""
+        scored: list[tuple[int, float, int, dict[str, Any], bool]] = []
+        figure_match_found = False
+        for paragraph in filtered:
+            score, matched_figure = self._score_paragraph_for_figure(
+                paragraph_text=paragraph["text"],
+                figure_id=figure_id,
+                caption_terms=caption_terms,
+            )
+            figure_match_found = figure_match_found or matched_figure
+            distance = self._spatial_distance(figure_bbox, paragraph["bbox"])
+            scored.append((score, distance, paragraph["index"], paragraph, matched_figure))
+
+        scored.sort(key=lambda item: (-item[0], item[1], item[2]))
+        eligible = [item for item in scored if item[0] > 0]
+        if not eligible:
+            self._log(f"Figure '{figure_id}' has no positively scored figure-local context candidates")
+            return "", ""
+
+        relevant_records = [item[3] for item in eligible[:MAX_RELEVANT_PARAGRAPHS]]
+        relevant_indexes = {record["index"] for record in relevant_records}
+
+        remaining = [item for item in eligible if item[3]["index"] not in relevant_indexes]
+        remaining.sort(key=lambda item: (item[1], item[2]))
+        surrounding_records = [item[3] for item in remaining[:MAX_SURROUNDING_PARAGRAPHS]]
+
+        self._log(
+            f"Figure '{figure_id}' context selection "
+            f"(figure_match_found={figure_match_found}, relevant_count={len(relevant_records)}, "
+            f"surrounding_count={len(surrounding_records)})"
+        )
+        relevant = " ".join(record["text"] for record in relevant_records)
+        surrounding = " ".join(record["text"] for record in surrounding_records)
         return self._searchable_text(relevant), self._searchable_text(surrounding)
 
     def _generate_document_summary(self, *, source_name: str, document_text: str) -> str:
@@ -966,21 +1204,30 @@ class DocumentLayoutNoSkillV2Service:
             source_name=path.name,
             summary_method="document_text",
         )
+        page_dimensions = self._page_dimensions_map(result)
 
         page_text: dict[int, list[str]] = {}
+        page_paragraphs: dict[int, list[dict[str, Any]]] = {}
         full_document_parts: list[str] = []
-        for paragraph in getattr(result, "paragraphs", None) or []:
+        for index, paragraph in enumerate(getattr(result, "paragraphs", None) or []):
             content = self._searchable_text(getattr(paragraph, "content", "") or "")
-            page_number = self._page_number_from_regions(paragraph)
             if not content:
                 continue
             full_document_parts.append(content)
-            if page_number is None:
+            paragraph_record = self._build_paragraph_record(
+                paragraph=paragraph,
+                index=index,
+                page_dimensions=page_dimensions,
+            )
+            if not paragraph_record:
                 continue
-            page_text.setdefault(page_number, []).append(content)
+            page_number = paragraph_record["page_number"]
+            page_text.setdefault(page_number, []).append(paragraph_record["text"])
+            page_paragraphs.setdefault(page_number, []).append(paragraph_record)
         self._log(
             f"Collected paragraph text for '{path.name}' "
-            f"(pages_with_text={len(page_text)}, paragraph_count={len(full_document_parts)})"
+            f"(pages_with_text={len(page_text)}, paragraph_count={len(full_document_parts)}, "
+            f"geometry_paragraph_count={sum(len(items) for items in page_paragraphs.values())})"
         )
 
         document_summary = self._generate_document_summary(
@@ -1024,6 +1271,10 @@ class DocumentLayoutNoSkillV2Service:
             caption = self._searchable_text(getattr(getattr(figure, "caption", None), "content", None) or "")
             page_number = self._page_number_from_regions(figure) or 0
             bounding_regions = self._bounding_regions_record(getattr(figure, "bounding_regions", None))
+            figure_bbox = self._bbox_from_bounding_regions(
+                bounding_regions=bounding_regions,
+                page_dimensions=page_dimensions,
+            )
             self._log(
                 f"Processing figure '{figure_id}' from '{path.name}' "
                 f"(page={page_number}, caption_present={bool(caption)}, regions={len(bounding_regions)})"
@@ -1033,8 +1284,9 @@ class DocumentLayoutNoSkillV2Service:
             relevant_text, surrounding_text = self._select_relevant_text(
                 figure_id=figure_id,
                 caption=caption,
+                figure_bbox=figure_bbox,
                 page_number=page_number,
-                page_paragraphs=page_text,
+                page_paragraphs=page_paragraphs,
             )
             visual_heuristics = self._guess_visual_heuristics(
                 caption=caption,
