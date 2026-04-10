@@ -3,3 +3,4 @@ azure-identity>=1.17.1
 python-dotenv>=1.0.1
 azure-storage-blob>=12.23.1
 azure-search-documents>=11.6.0
+pytest>=8.0.0
