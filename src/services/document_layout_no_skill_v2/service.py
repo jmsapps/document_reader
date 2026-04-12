@@ -1,4 +1,3 @@
-import base64
 import json
 import re
 from pathlib import Path
@@ -12,6 +11,7 @@ from azure.ai.documentintelligence.models import DocumentContentFormat
 from src.conf.conf import get_config
 from src.services.ai_search.service import AISearchService
 from src.services.document_intelligence.service import DocumentIntelligenceService
+from src.services.openai import OpenAIService, OpenAIServiceError
 from src.services.shared import (
     DEFAULT_CHUNK_CONTAINER,
     DEFAULT_TARGET_INDEX_NAME,
@@ -39,13 +39,17 @@ MAX_SURROUNDING_PARAGRAPHS = 2
 class SearchApiError(ValueError):
     """Structured Azure AI Search REST error."""
 
-    def __init__(self, *, method: str, path: str, status_code: int | None, detail: str) -> None:
+    def __init__(
+        self, *, method: str, path: str, status_code: int | None, detail: str
+    ) -> None:
         self.method = method
         self.path = path
         self.status_code = status_code
         self.detail = detail
         status_text = f"status={status_code}" if status_code is not None else ""
-        super().__init__(f"Search API {method} {path} failed: {status_text} detail={detail}")
+        super().__init__(
+            f"Search API {method} {path} failed: {status_text} detail={detail}"
+        )
 
 
 class OpenAIApiError(ValueError):
@@ -57,6 +61,10 @@ class OpenAIApiError(ValueError):
         self.detail = detail
         status_text = f"status={status_code}" if status_code is not None else ""
         super().__init__(f"Azure OpenAI {path} failed: {status_text} detail={detail}")
+
+    @classmethod
+    def from_service_error(cls, exc: OpenAIServiceError) -> "OpenAIApiError":
+        return cls(path=exc.path, status_code=exc.status_code, detail=exc.detail)
 
 
 class DocumentLayoutNoSkillV2Service:
@@ -80,7 +88,9 @@ class DocumentLayoutNoSkillV2Service:
         if not search_endpoint:
             raise ValueError("Missing AZURE_AI_SEARCH_ENDPOINT.")
         if not search_api_key:
-            raise ValueError("Missing AZURE_AI_SEARCH_API_KEY (key-based auth required).")
+            raise ValueError(
+                "Missing AZURE_AI_SEARCH_API_KEY (key-based auth required)."
+            )
         if not openai_endpoint:
             raise ValueError("Missing AZURE_OPENAI_ENDPOINT.")
         if not openai_api_key:
@@ -99,13 +109,13 @@ class DocumentLayoutNoSkillV2Service:
 
         self.search_endpoint = search_endpoint.rstrip("/")
         self.search_api_key = search_api_key
-        self.openai_base_url = self._normalize_openai_base_url(openai_endpoint)
-        self.openai_api_key = openai_api_key
         self.chat_deployment = openai_chat_deployment or openai_verbalization_deployment
         self.interpret_deployment = openai_interpret_deployment
         self.verbalization_deployment = openai_verbalization_deployment
         self.embedding_deployment = openai_embedding_deployment
-        self.embedding_dimensions = int(openai_embedding_dimensions or DEFAULT_EMBEDDING_DIMENSIONS)
+        self.embedding_dimensions = int(
+            openai_embedding_dimensions or DEFAULT_EMBEDDING_DIMENSIONS
+        )
         self.di_service = DocumentIntelligenceService()
         self.ai_search_service = AISearchService()
         self.storage_service: AzureStorageAccountService | None = None
@@ -115,6 +125,7 @@ class DocumentLayoutNoSkillV2Service:
                 api_key=storage_blob_api_key,
             )
         self.local_output_store = LocalOutputStore()
+        self.openai_service = OpenAIService()
 
     @staticmethod
     def _log(message: str) -> None:
@@ -132,13 +143,6 @@ class DocumentLayoutNoSkillV2Service:
     @staticmethod
     def _optional_text(value: Any) -> str:
         return str(value or "").strip()
-
-    @staticmethod
-    def _normalize_openai_base_url(endpoint: str) -> str:
-        normalized = endpoint.rstrip("/")
-        if normalized.endswith("/openai/v1"):
-            return normalized
-        return f"{normalized}/openai/v1"
 
     @classmethod
     def _metadata_record(
@@ -159,13 +163,17 @@ class DocumentLayoutNoSkillV2Service:
         ocr_text: str = "",
         caption: str = "",
     ) -> dict[str, Any]:
-        image_metadata = image if image is not None else cls._image_metadata_record(
-            page_number=page_number,
-            figure_id=figure_id,
-            summary_method=summary_method,
-            bounding_regions=bounding_regions,
-            ocr_text=ocr_text,
-            caption=caption,
+        image_metadata = (
+            image
+            if image is not None
+            else cls._image_metadata_record(
+                page_number=page_number,
+                figure_id=figure_id,
+                summary_method=summary_method,
+                bounding_regions=bounding_regions,
+                ocr_text=ocr_text,
+                caption=caption,
+            )
         )
         return {
             "source_type": cls._optional_text(source_type) or "text",
@@ -231,7 +239,9 @@ class DocumentLayoutNoSkillV2Service:
         return records
 
     @classmethod
-    def _chunk_text(cls, text: str, *, chunk_size: int, chunk_overlap: int) -> list[str]:
+    def _chunk_text(
+        cls, text: str, *, chunk_size: int, chunk_overlap: int
+    ) -> list[str]:
         normalized = cls._searchable_text(text)
         if not normalized:
             return []
@@ -299,7 +309,11 @@ class DocumentLayoutNoSkillV2Service:
         for region in bounding_regions:
             page_number = region.get("page_number")
             polygon = region.get("polygon") or []
-            if not isinstance(page_number, int) or not isinstance(polygon, list) or len(polygon) < 4:
+            if (
+                not isinstance(page_number, int)
+                or not isinstance(polygon, list)
+                or len(polygon) < 4
+            ):
                 continue
             dims = page_dimensions.get(page_number)
             if not dims:
@@ -347,7 +361,9 @@ class DocumentLayoutNoSkillV2Service:
         text = cls._searchable_text(getattr(paragraph, "content", "") or "")
         if not text:
             return None
-        bounding_regions = cls._bounding_regions_record(getattr(paragraph, "bounding_regions", None))
+        bounding_regions = cls._bounding_regions_record(
+            getattr(paragraph, "bounding_regions", None)
+        )
         bbox = cls._bbox_from_bounding_regions(
             bounding_regions=bounding_regions,
             page_dimensions=page_dimensions,
@@ -402,7 +418,9 @@ class DocumentLayoutNoSkillV2Service:
         return references
 
     @staticmethod
-    def _horizontal_overlap_ratio(figure_bbox: dict[str, float], paragraph_bbox: dict[str, float]) -> float:
+    def _horizontal_overlap_ratio(
+        figure_bbox: dict[str, float], paragraph_bbox: dict[str, float]
+    ) -> float:
         overlap = min(figure_bbox["right"], paragraph_bbox["right"]) - max(
             figure_bbox["left"],
             paragraph_bbox["left"],
@@ -414,7 +432,9 @@ class DocumentLayoutNoSkillV2Service:
         return overlap / min(figure_width, paragraph_width)
 
     @staticmethod
-    def _spatial_distance(figure_bbox: dict[str, float], paragraph_bbox: dict[str, float]) -> float:
+    def _spatial_distance(
+        figure_bbox: dict[str, float], paragraph_bbox: dict[str, float]
+    ) -> float:
         return abs(paragraph_bbox["center_y"] - figure_bbox["center_y"])
 
     @classmethod
@@ -428,9 +448,16 @@ class DocumentLayoutNoSkillV2Service:
         if overlap < MIN_HORIZONTAL_OVERLAP:
             return False
 
-        vertically_near = abs(paragraph_bbox["center_y"] - figure_bbox["center_y"]) < VERTICAL_PROXIMITY_THRESHOLD
-        below_band = 0 <= paragraph_bbox["top"] - figure_bbox["bottom"] < CAPTION_BAND_THRESHOLD
-        above_band = 0 <= figure_bbox["top"] - paragraph_bbox["bottom"] < CAPTION_BAND_THRESHOLD
+        vertically_near = (
+            abs(paragraph_bbox["center_y"] - figure_bbox["center_y"])
+            < VERTICAL_PROXIMITY_THRESHOLD
+        )
+        below_band = (
+            0 <= paragraph_bbox["top"] - figure_bbox["bottom"] < CAPTION_BAND_THRESHOLD
+        )
+        above_band = (
+            0 <= figure_bbox["top"] - paragraph_bbox["bottom"] < CAPTION_BAND_THRESHOLD
+        )
         return vertically_near or below_band or above_band
 
     @classmethod
@@ -453,7 +480,13 @@ class DocumentLayoutNoSkillV2Service:
         if caption_terms and any(term in lower for term in caption_terms):
             score += 5
 
-        if "figure" in lower or "fig." in lower or "chart" in lower or "diagram" in lower or "table" in lower:
+        if (
+            "figure" in lower
+            or "fig." in lower
+            or "chart" in lower
+            or "diagram" in lower
+            or "table" in lower
+        ):
             score += 1
 
         normalized_figure_id = cls._normalize_figure_id(figure_id)
@@ -465,7 +498,9 @@ class DocumentLayoutNoSkillV2Service:
 
         return score, matched_figure
 
-    def _search_request(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _search_request(
+        self, method: str, path: str, body: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         url = f"{self.search_endpoint}{path}?api-version={SEARCH_API_VERSION}"
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = Request(url, data=data, method=method)
@@ -530,20 +565,32 @@ class DocumentLayoutNoSkillV2Service:
         self._log(f"Creating or updating index '{index_name}'")
         search_index_client = self.ai_search_service.get_search_index_client()
         search_index_client.create_or_update_index(
-            build_shared_index(name=index_name, embedding_dimensions=self.embedding_dimensions)
+            build_shared_index(
+                name=index_name, embedding_dimensions=self.embedding_dimensions
+            )
         )
 
-    def _upload_records(self, *, index_name: str, records: list[dict[str, Any]]) -> None:
+    def _upload_records(
+        self, *, index_name: str, records: list[dict[str, Any]]
+    ) -> None:
         self._log(f"Uploading {len(records)} record(s) to index '{index_name}'")
         for start in range(0, len(records), 500):
-            batch = records[start:start + 500]
+            batch = records[start : start + 500]
             self._log(
                 f"Uploading batch {(start // 500) + 1} with {len(batch)} record(s) to '{index_name}'"
             )
-            body = {"value": [{"@search.action": "mergeOrUpload", **record} for record in batch]}
-            self._search_request("POST", f"/indexes/{quote(index_name)}/docs/index", body)
+            body = {
+                "value": [
+                    {"@search.action": "mergeOrUpload", **record} for record in batch
+                ]
+            }
+            self._search_request(
+                "POST", f"/indexes/{quote(index_name)}/docs/index", body
+            )
 
-    def _save_artifact(self, *, container_name: str, blob_name: str, payload: Any) -> str:
+    def _save_artifact(
+        self, *, container_name: str, blob_name: str, payload: Any
+    ) -> str:
         if self.storage_service:
             return self.storage_service.upload_json(
                 container_name=container_name,
@@ -555,7 +602,9 @@ class DocumentLayoutNoSkillV2Service:
         self.local_output_store.save(payload, str(local_path))
         return str(local_path)
 
-    def _save_text_artifact(self, *, container_name: str, blob_name: str, text: str) -> str:
+    def _save_text_artifact(
+        self, *, container_name: str, blob_name: str, text: str
+    ) -> str:
         if self.storage_service:
             return self.storage_service.upload_text(
                 container_name=container_name,
@@ -598,7 +647,9 @@ class DocumentLayoutNoSkillV2Service:
         return sorted(files)
 
     @staticmethod
-    def _metadata_from_payload(payload: dict[str, Any], source_name: str) -> dict[str, Any]:
+    def _metadata_from_payload(
+        payload: dict[str, Any], source_name: str
+    ) -> dict[str, Any]:
         metadata = payload.get("metadata") or {}
         image_metadata = metadata.get("image") or {}
         return DocumentLayoutNoSkillV2Service._metadata_record(
@@ -610,10 +661,16 @@ class DocumentLayoutNoSkillV2Service:
             source_url_text=str(metadata.get("source_url_text") or source_name),
             source_name=str(metadata.get("source_name") or source_name),
             image=DocumentLayoutNoSkillV2Service._image_metadata_record(
-                page_number=image_metadata.get("page_number", metadata.get("page_number")),
-                figure_id=str(image_metadata.get("figure_id") or metadata.get("figure_id") or ""),
+                page_number=image_metadata.get(
+                    "page_number", metadata.get("page_number")
+                ),
+                figure_id=str(
+                    image_metadata.get("figure_id") or metadata.get("figure_id") or ""
+                ),
                 summary_method=str(
-                    image_metadata.get("summary_method") or metadata.get("summary_method") or ""
+                    image_metadata.get("summary_method")
+                    or metadata.get("summary_method")
+                    or ""
                 ),
                 bounding_regions=image_metadata.get("bounding_regions") or [],
                 ocr_text=str(image_metadata.get("ocr_text") or ""),
@@ -631,65 +688,6 @@ class DocumentLayoutNoSkillV2Service:
                 content_type="application/pdf",
             )
 
-    def _openai_request(
-        self,
-        path: str,
-        body: dict[str, Any],
-        *,
-        log_label: str,
-        deployment: str,
-    ) -> dict[str, Any]:
-        url = f"{self.openai_base_url}{path}"
-        data = json.dumps(body).encode("utf-8")
-        req = Request(url, data=data, method="POST")
-        req.add_header("api-key", self.openai_api_key)
-        req.add_header("Content-Type", "application/json")
-        self._log(f"Azure OpenAI start: {log_label} using deployment '{deployment}'")
-
-        try:
-            with urlopen(req, timeout=300) as resp:
-                raw = resp.read()
-                self._log(f"Azure OpenAI complete: {log_label} using deployment '{deployment}'")
-                return json.loads(raw.decode("utf-8")) if raw else {}
-        except HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise OpenAIApiError(path=path, status_code=exc.code, detail=detail) from exc
-        except URLError as exc:
-            raise OpenAIApiError(path=path, status_code=None, detail=str(exc)) from exc
-
-    @staticmethod
-    def _extract_response_text(payload: dict[str, Any]) -> str:
-        output_text = payload.get("output_text")
-        if isinstance(output_text, str) and output_text.strip():
-            return output_text.strip()
-
-        for item in payload.get("output", []) or []:
-            for content in item.get("content", []) or []:
-                text = content.get("text")
-                if isinstance(text, str) and text.strip():
-                    return text.strip()
-        return ""
-
-    @classmethod
-    def _parse_json_response_text(cls, text: str) -> dict[str, Any]:
-        normalized = text.strip()
-        if normalized.startswith("```"):
-            normalized = re.sub(r"^```(?:json)?\s*", "", normalized)
-            normalized = re.sub(r"\s*```$", "", normalized)
-
-        try:
-            parsed = json.loads(normalized)
-        except json.JSONDecodeError:
-            start = normalized.find("{")
-            end = normalized.rfind("}")
-            if start == -1 or end == -1 or end < start:
-                raise ValueError("Azure OpenAI response did not contain valid JSON.")
-            parsed = json.loads(normalized[start:end + 1])
-
-        if not isinstance(parsed, dict):
-            raise ValueError("Azure OpenAI JSON response was not an object.")
-        return parsed
-
     def _responses_text(
         self,
         *,
@@ -697,28 +695,20 @@ class DocumentLayoutNoSkillV2Service:
         system_prompt: str,
         user_prompt: str,
     ) -> str:
-        payload = {
-            "model": deployment,
-            "input": [
-                {
-                    "role": "system",
-                    "content": [{"type": "input_text", "text": system_prompt}],
-                },
-                {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": user_prompt}],
-                },
-            ],
-        }
-        response = self._openai_request(
-            "/responses",
-            payload,
-            log_label="text response generation",
-            deployment=deployment,
+        self._log(
+            f"Azure OpenAI start: text response generation using deployment '{deployment}'"
         )
-        text = self._extract_response_text(response)
-        if not text:
-            raise ValueError("Azure OpenAI responses call returned no text output.")
+        try:
+            text = self.openai_service.responses_text(
+                deployment=deployment,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+        except OpenAIServiceError as exc:
+            raise OpenAIApiError.from_service_error(exc) from exc
+        self._log(
+            f"Azure OpenAI complete: text response generation using deployment '{deployment}'"
+        )
         return text
 
     def _responses_json_with_image(
@@ -730,61 +720,39 @@ class DocumentLayoutNoSkillV2Service:
         image_bytes: bytes,
         mime_type: str = "image/png",
     ) -> dict[str, Any]:
-        image_data_url = (
-            f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+        self._log(
+            f"Azure OpenAI start: multimodal grounded interpretation using deployment '{deployment}'"
         )
-        payload = {
-            "model": deployment,
-            "input": [
-                {
-                    "role": "system",
-                    "content": [{"type": "input_text", "text": system_prompt}],
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": user_prompt},
-                        {"type": "input_image", "image_url": image_data_url},
-                    ],
-                },
-            ],
-        }
-        response = self._openai_request(
-            "/responses",
-            payload,
-            log_label="multimodal grounded interpretation",
-            deployment=deployment,
+        try:
+            payload = self.openai_service.responses_multimodal_json(
+                deployment=deployment,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                image_bytes=image_bytes,
+                content_type=mime_type,
+            )
+        except OpenAIServiceError as exc:
+            raise OpenAIApiError.from_service_error(exc) from exc
+        self._log(
+            f"Azure OpenAI complete: multimodal grounded interpretation using deployment '{deployment}'"
         )
-        text = self._extract_response_text(response)
-        if not text:
-            raise ValueError("Azure OpenAI multimodal responses call returned no text output.")
-        return self._parse_json_response_text(text)
+        return payload
 
     def _embed_text(self, text: str) -> list[float]:
         normalized = self._searchable_text(text)
         if not normalized:
             raise ValueError("Cannot embed empty text.")
-        payload = {
-            "model": self.embedding_deployment,
-            "input": normalized,
-        }
         self._log(
             "Generating text embedding "
             f"(deployment='{self.embedding_deployment}', chars={len(normalized)})"
         )
-        response = self._openai_request(
-            "/embeddings",
-            payload,
-            log_label="text embedding",
-            deployment=self.embedding_deployment,
-        )
-        data = response.get("data") or []
-        if not data:
-            raise ValueError("Azure OpenAI embeddings call returned no data.")
-        embedding = data[0].get("embedding") or []
-        if not isinstance(embedding, list) or not embedding:
-            raise ValueError("Azure OpenAI embeddings call returned no embedding vector.")
-        return [float(value) for value in embedding]
+        try:
+            return self.openai_service.embeddings(
+                deployment=self.embedding_deployment,
+                text=normalized,
+            )
+        except OpenAIServiceError as exc:
+            raise OpenAIApiError.from_service_error(exc) from exc
 
     @classmethod
     def _guess_visual_heuristics(
@@ -795,7 +763,9 @@ class DocumentLayoutNoSkillV2Service:
         relevant_text: str,
         surrounding_text: str,
     ) -> dict[str, Any]:
-        combined = cls._searchable_text(" ".join([caption, figure_ocr_text, relevant_text, surrounding_text]))
+        combined = cls._searchable_text(
+            " ".join([caption, figure_ocr_text, relevant_text, surrounding_text])
+        )
         lower = combined.lower()
         figure_type = "figure"
         if any(term in lower for term in ["line chart", "line graph"]):
@@ -863,7 +833,9 @@ class DocumentLayoutNoSkillV2Service:
             f"(same_page_candidates={candidate_count}, spatial_candidates={len(filtered)})"
         )
         if not filtered:
-            self._log(f"Figure '{figure_id}' has no figure-local spatial context candidates")
+            self._log(
+                f"Figure '{figure_id}' has no figure-local spatial context candidates"
+            )
             return "", ""
 
         scored: list[tuple[int, float, int, dict[str, Any], bool]] = []
@@ -876,20 +848,28 @@ class DocumentLayoutNoSkillV2Service:
             )
             figure_match_found = figure_match_found or matched_figure
             distance = self._spatial_distance(figure_bbox, paragraph["bbox"])
-            scored.append((score, distance, paragraph["index"], paragraph, matched_figure))
+            scored.append(
+                (score, distance, paragraph["index"], paragraph, matched_figure)
+            )
 
         scored.sort(key=lambda item: (-item[0], item[1], item[2]))
         eligible = [item for item in scored if item[0] > 0]
         if not eligible:
-            self._log(f"Figure '{figure_id}' has no positively scored figure-local context candidates")
+            self._log(
+                f"Figure '{figure_id}' has no positively scored figure-local context candidates"
+            )
             return "", ""
 
         relevant_records = [item[3] for item in eligible[:MAX_RELEVANT_PARAGRAPHS]]
         relevant_indexes = {record["index"] for record in relevant_records}
 
-        remaining = [item for item in eligible if item[3]["index"] not in relevant_indexes]
+        remaining = [
+            item for item in eligible if item[3]["index"] not in relevant_indexes
+        ]
         remaining.sort(key=lambda item: (item[1], item[2]))
-        surrounding_records = [item[3] for item in remaining[:MAX_SURROUNDING_PARAGRAPHS]]
+        surrounding_records = [
+            item[3] for item in remaining[:MAX_SURROUNDING_PARAGRAPHS]
+        ]
 
         self._log(
             f"Figure '{figure_id}' context selection "
@@ -900,15 +880,21 @@ class DocumentLayoutNoSkillV2Service:
         surrounding = " ".join(record["text"] for record in surrounding_records)
         return self._searchable_text(relevant), self._searchable_text(surrounding)
 
-    def _generate_document_summary(self, *, source_name: str, document_text: str) -> str:
+    def _generate_document_summary(
+        self, *, source_name: str, document_text: str
+    ) -> str:
         normalized = self._searchable_text(document_text)
         if not normalized:
-            self._log(f"Skipping document summary for '{source_name}' because no normalized text was available")
+            self._log(
+                f"Skipping document summary for '{source_name}' because no normalized text was available"
+            )
             return ""
 
         deployment = self.chat_deployment or self.verbalization_deployment
         if not deployment:
-            self._log(f"Skipping document summary for '{source_name}' because no chat deployment is configured")
+            self._log(
+                f"Skipping document summary for '{source_name}' because no chat deployment is configured"
+            )
             return ""
 
         sample = normalized[:12000]
@@ -940,7 +926,9 @@ class DocumentLayoutNoSkillV2Service:
             )
             return summary
         except ValueError as exc:
-            self._log(f"Document summary generation failed for '{source_name}'; continuing without it. {exc}")
+            self._log(
+                f"Document summary generation failed for '{source_name}'; continuing without it. {exc}"
+            )
             return ""
 
     def _extract_figure_bytes(self, *, result_id: str, figure_id: str) -> bytes:
@@ -996,7 +984,9 @@ class DocumentLayoutNoSkillV2Service:
             "image_reference_mode": "memory-first",
         }
 
-    def _interpret_figure(self, *, figure_bytes: bytes, analysis_payload: dict[str, Any]) -> dict[str, Any]:
+    def _interpret_figure(
+        self, *, figure_bytes: bytes, analysis_payload: dict[str, Any]
+    ) -> dict[str, Any]:
         self._log(
             f"Starting grounded interpretation for figure '{analysis_payload['figure_id']}' "
             f"on page {analysis_payload['page_number']}"
@@ -1041,12 +1031,22 @@ class DocumentLayoutNoSkillV2Service:
             user_prompt=user_prompt,
             image_bytes=figure_bytes,
         )
-        grounded.setdefault("figure_type", self._optional_text(grounded.get("figure_type")) or "figure")
-        grounded.setdefault("what_it_shows", self._optional_text(grounded.get("what_it_shows")))
-        grounded.setdefault("key_relationships", grounded.get("key_relationships") or [])
-        grounded.setdefault("supporting_context", grounded.get("supporting_context") or {})
+        grounded.setdefault(
+            "figure_type", self._optional_text(grounded.get("figure_type")) or "figure"
+        )
+        grounded.setdefault(
+            "what_it_shows", self._optional_text(grounded.get("what_it_shows"))
+        )
+        grounded.setdefault(
+            "key_relationships", grounded.get("key_relationships") or []
+        )
+        grounded.setdefault(
+            "supporting_context", grounded.get("supporting_context") or {}
+        )
         grounded.setdefault("uncertainties", grounded.get("uncertainties") or [])
-        grounded.setdefault("confidence_notes", self._optional_text(grounded.get("confidence_notes")))
+        grounded.setdefault(
+            "confidence_notes", self._optional_text(grounded.get("confidence_notes"))
+        )
         self._log(
             f"Completed grounded interpretation for figure '{analysis_payload['figure_id']}' "
             f"(type='{grounded.get('figure_type')}', uncertainties={len(grounded.get('uncertainties') or [])})"
@@ -1086,12 +1086,19 @@ class DocumentLayoutNoSkillV2Service:
         lines = [
             "# Figure Summary",
             "",
-            cls._searchable_text(str(grounded.get("what_it_shows") or "No summary available.")),
+            cls._searchable_text(
+                str(grounded.get("what_it_shows") or "No summary available.")
+            ),
             "",
             "## Interpretation",
             cls._searchable_text(
-                " ".join(str(value) for value in relationships if cls._searchable_text(str(value)))
-            ) or "Interpretation details were limited to the grounded evidence available.",
+                " ".join(
+                    str(value)
+                    for value in relationships
+                    if cls._searchable_text(str(value))
+                )
+            )
+            or "Interpretation details were limited to the grounded evidence available.",
             "",
             "## Evidence",
         ]
@@ -1104,11 +1111,17 @@ class DocumentLayoutNoSkillV2Service:
         if context_lines:
             lines.append(cls._searchable_text(" ".join(context_lines)))
         else:
-            lines.append("Minimal contextual text was available beyond the figure-local evidence.")
+            lines.append(
+                "Minimal contextual text was available beyond the figure-local evidence."
+            )
 
         if uncertainties:
             lines.extend(["", "## Uncertainties"])
-            lines.extend(f"- {cls._searchable_text(str(value))}" for value in uncertainties if cls._searchable_text(str(value)))
+            lines.extend(
+                f"- {cls._searchable_text(str(value))}"
+                for value in uncertainties
+                if cls._searchable_text(str(value))
+            )
 
         return "\n".join(lines).strip()
 
@@ -1147,7 +1160,9 @@ class DocumentLayoutNoSkillV2Service:
             self._log(
                 f"Figure verbalization failed for '{analysis_payload['figure_id']}'; using deterministic fallback. {exc}"
             )
-            return self._markdown_from_grounded(grounded=grounded, analysis_payload=analysis_payload)
+            return self._markdown_from_grounded(
+                grounded=grounded, analysis_payload=analysis_payload
+            )
 
     def _json_records(
         self,
@@ -1252,7 +1267,9 @@ class DocumentLayoutNoSkillV2Service:
                         "id": self._make_record_id(source_name, "text", ordinal),
                         "metadata": {
                             **base_metadata,
-                            "image": self._image_metadata_record(page_number=page_number),
+                            "image": self._image_metadata_record(
+                                page_number=page_number
+                            ),
                         },
                         "content": content,
                         "contentVector": self._embed_text(content),
@@ -1260,17 +1277,25 @@ class DocumentLayoutNoSkillV2Service:
                 )
                 ordinal += 1
                 text_chunk_count += 1
-        self._log(f"Derived {text_chunk_count} text chunk record(s) from PDF source '{path.name}'")
+        self._log(
+            f"Derived {text_chunk_count} text chunk record(s) from PDF source '{path.name}'"
+        )
 
         figures = getattr(result, "figures", None) or []
         self._log(f"Found {len(figures)} figure(s) in PDF source '{path.name}'")
         for figure in figures:
             if not operation_id:
-                raise ValueError("Document Intelligence analyze result did not return operation_id for figures.")
+                raise ValueError(
+                    "Document Intelligence analyze result did not return operation_id for figures."
+                )
             figure_id = getattr(figure, "id", None) or f"figure-{ordinal}"
-            caption = self._searchable_text(getattr(getattr(figure, "caption", None), "content", None) or "")
+            caption = self._searchable_text(
+                getattr(getattr(figure, "caption", None), "content", None) or ""
+            )
             page_number = self._page_number_from_regions(figure) or 0
-            bounding_regions = self._bounding_regions_record(getattr(figure, "bounding_regions", None))
+            bounding_regions = self._bounding_regions_record(
+                getattr(figure, "bounding_regions", None)
+            )
             figure_bbox = self._bbox_from_bounding_regions(
                 bounding_regions=bounding_regions,
                 page_dimensions=page_dimensions,
@@ -1279,7 +1304,9 @@ class DocumentLayoutNoSkillV2Service:
                 f"Processing figure '{figure_id}' from '{path.name}' "
                 f"(page={page_number}, caption_present={bool(caption)}, regions={len(bounding_regions)})"
             )
-            figure_bytes = self._extract_figure_bytes(result_id=operation_id, figure_id=figure_id)
+            figure_bytes = self._extract_figure_bytes(
+                result_id=operation_id, figure_id=figure_id
+            )
             figure_ocr_text = self._extract_figure_text(figure_bytes)
             relevant_text, surrounding_text = self._select_relevant_text(
                 figure_id=figure_id,
@@ -1305,7 +1332,9 @@ class DocumentLayoutNoSkillV2Service:
                 data=figure_bytes,
                 content_type="image/png",
             )
-            self._log(f"Persisted figure image for '{figure_id}' to '{image_artifact_uri}'")
+            self._log(
+                f"Persisted figure image for '{figure_id}' to '{image_artifact_uri}'"
+            )
             analysis_payload = self._build_figure_analysis_payload(
                 source_name=path.name,
                 source_url=source_url,
@@ -1325,7 +1354,9 @@ class DocumentLayoutNoSkillV2Service:
                 blob_name=f"figure-analysis-v2/{source_name}/{figure_id}.json",
                 payload=analysis_payload,
             )
-            self._log(f"Persisted figure-analysis artifact for '{figure_id}' to '{analysis_artifact}'")
+            self._log(
+                f"Persisted figure-analysis artifact for '{figure_id}' to '{analysis_artifact}'"
+            )
             grounded = self._interpret_figure(
                 figure_bytes=figure_bytes,
                 analysis_payload=analysis_payload,
@@ -1335,7 +1366,9 @@ class DocumentLayoutNoSkillV2Service:
                 blob_name=f"figure-grounded-v2/{source_name}/{figure_id}.json",
                 payload=grounded,
             )
-            self._log(f"Persisted grounded interpretation artifact for '{figure_id}' to '{grounded_artifact}'")
+            self._log(
+                f"Persisted grounded interpretation artifact for '{figure_id}' to '{grounded_artifact}'"
+            )
             figure_markdown = self._verbalize_figure(
                 grounded=grounded,
                 analysis_payload=analysis_payload,
@@ -1345,7 +1378,9 @@ class DocumentLayoutNoSkillV2Service:
                 blob_name=f"figure-markdown-v2/{source_name}/{figure_id}.md",
                 text=figure_markdown,
             )
-            self._log(f"Persisted markdown artifact for '{figure_id}' to '{markdown_artifact}'")
+            self._log(
+                f"Persisted markdown artifact for '{figure_id}' to '{markdown_artifact}'"
+            )
             support_artifacts.append(
                 {
                     "source": path.name,
@@ -1433,7 +1468,9 @@ class DocumentLayoutNoSkillV2Service:
             "records": records,
         }
         blob_name = f"{source_path.stem}.json"
-        artifact_uri = self._save_artifact(container_name=container_name, blob_name=blob_name, payload=artifact)
+        artifact_uri = self._save_artifact(
+            container_name=container_name, blob_name=blob_name, payload=artifact
+        )
         self._log(
             f"Persisted derived source artifact for '{source_path.name}' to '{artifact_uri}' "
             f"(records={len(records)}, support_artifacts={len(support_artifacts)})"
