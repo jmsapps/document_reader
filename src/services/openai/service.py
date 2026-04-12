@@ -1,6 +1,6 @@
 import base64
 import json
-from typing import Literal
+from typing import Any, Literal
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -112,23 +112,87 @@ class OpenAIService:
         return ""
 
     @classmethod
-    def _parse_json_response_text(cls, text: str) -> dict:
+    def _parse_json_response_value_text(cls, text: str) -> Any:
         normalized = text.strip()
         if normalized.startswith("```"):
             normalized = normalized.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
 
         try:
-            parsed = json.loads(normalized)
+            return json.loads(normalized)
         except json.JSONDecodeError:
             start = normalized.find("{")
             end = normalized.rfind("}")
+            if start != -1 and end != -1 and end >= start:
+                return json.loads(normalized[start:end + 1])
+
+            start = normalized.find("[")
+            end = normalized.rfind("]")
             if start == -1 or end == -1 or end < start:
                 raise ValueError("Azure OpenAI response did not contain valid JSON.")
-            parsed = json.loads(normalized[start:end + 1])
+            return json.loads(normalized[start:end + 1])
 
+    @classmethod
+    def _parse_json_response_text(cls, text: str) -> dict:
+        parsed = cls._parse_json_response_value_text(text)
         if not isinstance(parsed, dict):
             raise ValueError("Azure OpenAI JSON response was not an object.")
         return parsed
+
+    @staticmethod
+    def _build_text_content(*, user_prompt: str) -> list[dict]:
+        return [{"type": "input_text", "text": user_prompt}]
+
+    @staticmethod
+    def _build_multimodal_content(
+        *,
+        user_prompt: str,
+        image_bytes: bytes,
+        content_type: str,
+    ) -> list[dict]:
+        image_data_url = f"data:{content_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+        return [
+            {"type": "input_text", "text": user_prompt},
+            {"type": "input_image", "image_url": image_data_url},
+        ]
+
+    @staticmethod
+    def _build_input_items(*, user_content: list[dict], system_prompt: str | None) -> list[dict]:
+        input_items: list[dict] = []
+        if system_prompt:
+            input_items.append(
+                {
+                    "role": "system",
+                    "content": [{"type": "input_text", "text": system_prompt}],
+                }
+            )
+        input_items.append({"role": "user", "content": user_content})
+        return input_items
+
+    def _build_responses_payload(
+        self,
+        *,
+        selected_deployment: str,
+        input_items: list[dict],
+        text_format: dict | None = None,
+    ) -> dict:
+        payload = {
+            "model": selected_deployment,
+            "input": input_items,
+        }
+        if text_format is not None:
+            payload["text"] = {"format": text_format}
+        return payload
+
+    @staticmethod
+    def _extract_structured_response_value(payload: dict) -> Any:
+        for item in payload.get("output", []) or []:
+            for content in item.get("content", []) or []:
+                if "json" in content:
+                    return content["json"]
+                text = content.get("text")
+                if isinstance(text, str) and text.strip():
+                    return OpenAIService._parse_json_response_value_text(text)
+        raise ValueError("Azure OpenAI structured responses call returned no structured output.")
 
     def responses_text(
         self,
@@ -142,24 +206,14 @@ class OpenAIService:
         if not selected_deployment:
             raise ValueError(f"No Azure OpenAI deployment configured for purpose '{purpose}'.")
 
-        input_items: list[dict] = []
-        if system_prompt:
-            input_items.append(
-                {
-                    "role": "system",
-                    "content": [{"type": "input_text", "text": system_prompt}],
-                }
-            )
-        input_items.append(
-            {
-                "role": "user",
-                "content": [{"type": "input_text", "text": user_prompt}],
-            }
+        input_items = self._build_input_items(
+            user_content=self._build_text_content(user_prompt=user_prompt),
+            system_prompt=system_prompt,
         )
-        payload = {
-            "model": selected_deployment,
-            "input": input_items,
-        }
+        payload = self._build_responses_payload(
+            selected_deployment=selected_deployment,
+            input_items=input_items,
+        )
         response = self._request(path="/responses", payload=payload)
         text = self._extract_response_text(response)
         if not text:
@@ -180,33 +234,89 @@ class OpenAIService:
         if not selected_deployment:
             raise ValueError(f"No Azure OpenAI deployment configured for purpose '{purpose}'.")
 
-        image_data_url = f"data:{content_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
-        input_items: list[dict] = []
-        if system_prompt:
-            input_items.append(
-                {
-                    "role": "system",
-                    "content": [{"type": "input_text", "text": system_prompt}],
-                }
-            )
-        input_items.append(
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": user_prompt},
-                    {"type": "input_image", "image_url": image_data_url},
-                ],
-            }
+        input_items = self._build_input_items(
+            user_content=self._build_multimodal_content(
+                user_prompt=user_prompt,
+                image_bytes=image_bytes,
+                content_type=content_type,
+            ),
+            system_prompt=system_prompt,
         )
-        payload = {
-            "model": selected_deployment,
-            "input": input_items,
-        }
+        payload = self._build_responses_payload(
+            selected_deployment=selected_deployment,
+            input_items=input_items,
+        )
         response = self._request(path="/responses", payload=payload)
         text = self._extract_response_text(response)
         if not text:
             raise ValueError("Azure OpenAI multimodal responses call returned no text output.")
         return text
+
+    def responses_structured(
+        self,
+        *,
+        user_prompt: str,
+        json_schema: dict,
+        system_prompt: str | None = None,
+        deployment: str | None = None,
+        purpose: DeploymentPurpose = "chat",
+    ) -> Any:
+        selected_deployment = deployment or self.get_deployment(purpose)
+        if not selected_deployment:
+            raise ValueError(f"No Azure OpenAI deployment configured for purpose '{purpose}'.")
+        if not isinstance(json_schema, dict) or not json_schema:
+            raise ValueError("json_schema must be a non-empty dictionary.")
+
+        input_items = self._build_input_items(
+            user_content=self._build_text_content(user_prompt=user_prompt),
+            system_prompt=system_prompt,
+        )
+        payload = self._build_responses_payload(
+            selected_deployment=selected_deployment,
+            input_items=input_items,
+            text_format={
+                "type": "json_schema",
+                **json_schema,
+            },
+        )
+        response = self._request(path="/responses", payload=payload)
+        return self._extract_structured_response_value(response)
+
+    def responses_multimodal_structured(
+        self,
+        *,
+        user_prompt: str,
+        image_bytes: bytes,
+        content_type: str,
+        json_schema: dict,
+        system_prompt: str | None = None,
+        deployment: str | None = None,
+        purpose: DeploymentPurpose = "interpret",
+    ) -> Any:
+        selected_deployment = deployment or self.get_deployment(purpose)
+        if not selected_deployment:
+            raise ValueError(f"No Azure OpenAI deployment configured for purpose '{purpose}'.")
+        if not isinstance(json_schema, dict) or not json_schema:
+            raise ValueError("json_schema must be a non-empty dictionary.")
+
+        input_items = self._build_input_items(
+            user_content=self._build_multimodal_content(
+                user_prompt=user_prompt,
+                image_bytes=image_bytes,
+                content_type=content_type,
+            ),
+            system_prompt=system_prompt,
+        )
+        payload = self._build_responses_payload(
+            selected_deployment=selected_deployment,
+            input_items=input_items,
+            text_format={
+                "type": "json_schema",
+                **json_schema,
+            },
+        )
+        response = self._request(path="/responses", payload=payload)
+        return self._extract_structured_response_value(response)
 
     def responses_multimodal_json(
         self,

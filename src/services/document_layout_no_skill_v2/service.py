@@ -34,6 +34,68 @@ CAPTION_BAND_THRESHOLD = 0.12
 MIN_HORIZONTAL_OVERLAP = 0.2
 MAX_RELEVANT_PARAGRAPHS = 2
 MAX_SURROUNDING_PARAGRAPHS = 2
+FIGURE_INTERPRETATION_SCHEMA: dict[str, Any] = {
+    "name": "figure_interpretation",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "figure_type": {"type": "string"},
+            "what_it_shows": {"type": "string"},
+            "key_relationships": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "supporting_context": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "image_evidence": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "ocr_evidence": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "relevant_text_evidence": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "surrounding_text_evidence": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "document_summary_evidence": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": [
+                    "image_evidence",
+                    "ocr_evidence",
+                    "relevant_text_evidence",
+                    "surrounding_text_evidence",
+                    "document_summary_evidence",
+                ],
+            },
+            "uncertainties": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "confidence_notes": {"type": "string"},
+        },
+        "required": [
+            "figure_type",
+            "what_it_shows",
+            "key_relationships",
+            "supporting_context",
+            "uncertainties",
+            "confidence_notes",
+        ],
+    },
+}
 
 
 class SearchApiError(ValueError):
@@ -738,6 +800,39 @@ class DocumentLayoutNoSkillV2Service:
         )
         return payload
 
+    def _responses_structured_with_image(
+        self,
+        *,
+        deployment: str,
+        system_prompt: str,
+        user_prompt: str,
+        json_schema: dict[str, Any],
+        image_bytes: bytes,
+        mime_type: str = "image/png",
+    ) -> dict[str, Any]:
+        self._log(
+            f"Azure OpenAI start: multimodal grounded interpretation using deployment '{deployment}'"
+        )
+        try:
+            payload = self.openai_service.responses_multimodal_structured(
+                deployment=deployment,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                json_schema=json_schema,
+                image_bytes=image_bytes,
+                content_type=mime_type,
+            )
+        except OpenAIServiceError as exc:
+            raise OpenAIApiError.from_service_error(exc) from exc
+        if not isinstance(payload, dict):
+            raise ValueError(
+                "Structured interpretation response was not a JSON object."
+            )
+        self._log(
+            f"Azure OpenAI complete: multimodal grounded interpretation using deployment '{deployment}'"
+        )
+        return payload
+
     def _embed_text(self, text: str) -> list[float]:
         normalized = self._searchable_text(text)
         if not normalized:
@@ -984,6 +1079,59 @@ class DocumentLayoutNoSkillV2Service:
             "image_reference_mode": "memory-first",
         }
 
+    @classmethod
+    def _normalize_string_list(cls, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        normalized: list[str] = []
+        for item in value:
+            text = cls._searchable_text(str(item))
+            if text:
+                normalized.append(text)
+        return normalized
+
+    @classmethod
+    def _validate_grounded_interpretation(
+        cls, grounded: dict[str, Any]
+    ) -> dict[str, Any]:
+        if not isinstance(grounded, dict):
+            raise ValueError("Structured interpretation payload was not a JSON object.")
+
+        figure_type = cls._optional_text(grounded.get("figure_type")) or "figure"
+        what_it_shows = cls._optional_text(grounded.get("what_it_shows"))
+        if not what_it_shows:
+            raise ValueError(
+                "Structured interpretation payload is missing non-empty 'what_it_shows'."
+            )
+
+        supporting_context = grounded.get("supporting_context")
+        if not isinstance(supporting_context, dict):
+            raise ValueError(
+                "Structured interpretation payload is missing 'supporting_context'."
+            )
+
+        normalized_supporting_context = {
+            key: cls._normalize_string_list(supporting_context.get(key))
+            for key in [
+                "image_evidence",
+                "ocr_evidence",
+                "relevant_text_evidence",
+                "surrounding_text_evidence",
+                "document_summary_evidence",
+            ]
+        }
+
+        return {
+            "figure_type": figure_type,
+            "what_it_shows": what_it_shows,
+            "key_relationships": cls._normalize_string_list(
+                grounded.get("key_relationships")
+            ),
+            "supporting_context": normalized_supporting_context,
+            "uncertainties": cls._normalize_string_list(grounded.get("uncertainties")),
+            "confidence_notes": cls._optional_text(grounded.get("confidence_notes")),
+        }
+
     def _interpret_figure(
         self, *, figure_bytes: bytes, analysis_payload: dict[str, Any]
     ) -> dict[str, Any]:
@@ -995,7 +1143,7 @@ class DocumentLayoutNoSkillV2Service:
             "You are a grounded figure interpretation model. Interpret the image visually first, "
             "then ground your interpretation using OCR, caption, relevant associated text, surrounding text, "
             "and document summary in that order of authority. Never let weaker context override stronger evidence. "
-            "If evidence is ambiguous, say so. Return JSON only."
+            "If evidence is ambiguous, say so."
         )
         user_prompt = (
             "Interpret this figure using only the evidence in this request.\n\n"
@@ -1013,40 +1161,16 @@ class DocumentLayoutNoSkillV2Service:
             "2. Relevant associated text\n"
             "3. Surrounding text\n"
             "4. Document summary\n\n"
-            "Return a JSON object with fields:\n"
-            "- figure_type\n"
-            "- what_it_shows\n"
-            "- key_relationships\n"
-            "- supporting_context.image_evidence\n"
-            "- supporting_context.ocr_evidence\n"
-            "- supporting_context.relevant_text_evidence\n"
-            "- supporting_context.surrounding_text_evidence\n"
-            "- supporting_context.document_summary_evidence\n"
-            "- uncertainties\n"
-            "- confidence_notes"
+            "Return a structured interpretation that matches the required schema."
         )
-        grounded = self._responses_json_with_image(
+        grounded = self._responses_structured_with_image(
             deployment=self.interpret_deployment,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
+            json_schema=FIGURE_INTERPRETATION_SCHEMA,
             image_bytes=figure_bytes,
         )
-        grounded.setdefault(
-            "figure_type", self._optional_text(grounded.get("figure_type")) or "figure"
-        )
-        grounded.setdefault(
-            "what_it_shows", self._optional_text(grounded.get("what_it_shows"))
-        )
-        grounded.setdefault(
-            "key_relationships", grounded.get("key_relationships") or []
-        )
-        grounded.setdefault(
-            "supporting_context", grounded.get("supporting_context") or {}
-        )
-        grounded.setdefault("uncertainties", grounded.get("uncertainties") or [])
-        grounded.setdefault(
-            "confidence_notes", self._optional_text(grounded.get("confidence_notes"))
-        )
+        grounded = self._validate_grounded_interpretation(grounded)
         self._log(
             f"Completed grounded interpretation for figure '{analysis_payload['figure_id']}' "
             f"(type='{grounded.get('figure_type')}', uncertainties={len(grounded.get('uncertainties') or [])})"
