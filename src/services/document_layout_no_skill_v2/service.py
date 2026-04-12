@@ -40,6 +40,9 @@ CAPTION_BAND_THRESHOLD = 0.12
 MIN_HORIZONTAL_OVERLAP = 0.2
 MAX_RELEVANT_PARAGRAPHS = 2
 MAX_SURROUNDING_PARAGRAPHS = 2
+MAX_KEY_RELATIONSHIPS = 3
+MAX_UNCERTAINTIES = 2
+MAX_SUPPORTING_EVIDENCE_PER_FIELD = 3
 FIGURE_INTERPRETATION_SCHEMA: dict[str, Any] = {
     "name": "figure_interpretation",
     "strict": True,
@@ -1109,6 +1112,10 @@ class DocumentLayoutNoSkillV2Service:
         return normalized
 
     @classmethod
+    def _limited_string_list(cls, value: Any, *, max_items: int) -> list[str]:
+        return cls._normalize_string_list(value)[:max_items]
+
+    @classmethod
     def _validate_grounded_interpretation(
         cls, grounded: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1129,7 +1136,10 @@ class DocumentLayoutNoSkillV2Service:
             )
 
         normalized_supporting_context = {
-            key: cls._normalize_string_list(supporting_context.get(key))
+            key: cls._limited_string_list(
+                supporting_context.get(key),
+                max_items=MAX_SUPPORTING_EVIDENCE_PER_FIELD,
+            )
             for key in [
                 "image_evidence",
                 "ocr_evidence",
@@ -1142,11 +1152,15 @@ class DocumentLayoutNoSkillV2Service:
         return {
             "figure_type": figure_type,
             "what_it_shows": what_it_shows,
-            "key_relationships": cls._normalize_string_list(
-                grounded.get("key_relationships")
+            "key_relationships": cls._limited_string_list(
+                grounded.get("key_relationships"),
+                max_items=MAX_KEY_RELATIONSHIPS,
             ),
             "supporting_context": normalized_supporting_context,
-            "uncertainties": cls._normalize_string_list(grounded.get("uncertainties")),
+            "uncertainties": cls._limited_string_list(
+                grounded.get("uncertainties"),
+                max_items=MAX_UNCERTAINTIES,
+            ),
             "confidence_notes": cls._optional_text(grounded.get("confidence_notes")),
         }
 
@@ -1161,7 +1175,11 @@ class DocumentLayoutNoSkillV2Service:
             "You are a grounded figure interpretation model. Interpret the image visually first, "
             "then ground your interpretation using OCR, caption, relevant associated text, surrounding text, "
             "and document summary in that order of authority. Never let weaker context override stronger evidence. "
-            "If evidence is ambiguous, say so."
+            "If evidence is ambiguous, say so. "
+            "Do not make causal claims unless causation is explicitly stated in the provided evidence. "
+            "For comparisons, use cautious language such as 'appears higher', 'appears lower', or 'among the lowest' "
+            "unless the ranking is visually unambiguous. "
+            "Prefer temporal descriptions such as earlier peak, later peak, or concurrent movement over causal explanations."
         )
         user_prompt = (
             "Interpret this figure using only the evidence in this request.\n\n"
@@ -1179,6 +1197,12 @@ class DocumentLayoutNoSkillV2Service:
             "2. Relevant associated text\n"
             "3. Surrounding text\n"
             "4. Document summary\n\n"
+            "Interpretation rules:\n"
+            "- State only visually grounded or text-grounded claims.\n"
+            "- If a strongest/weakest comparison is not visually clear, use cautious comparison wording.\n"
+            "- For time-series figures, describe timing and co-movement without implying causation unless the evidence explicitly states it.\n"
+            "- Keep 'key_relationships' to at most 3 short items.\n"
+            "- Keep 'uncertainties' to at most 2 short items.\n\n"
             "Return a structured interpretation that matches the required schema."
         )
         grounded = self._responses_structured_with_image(
@@ -1279,10 +1303,19 @@ class DocumentLayoutNoSkillV2Service:
         )
         system_prompt = (
             "You convert grounded figure interpretations into concise semantic markdown for retrieval. "
-            "Do not invent facts. Keep metadata out of the prose unless it materially helps retrieval."
+            "Do not invent facts. Keep metadata out of the prose unless it materially helps retrieval. "
+            "Be consistent and restrained. Avoid unsupported causal or strongest/weakest claims."
         )
         user_prompt = (
-            "Write markdown with sections: Figure Summary, Interpretation, Evidence, Context. "
+            "Write markdown with exactly these sections in this order: Figure Summary, Interpretation, Evidence, Context.\n"
+            "Formatting rules:\n"
+            "- Figure Summary: exactly 1 short paragraph, at most 2 sentences.\n"
+            "- Interpretation: 2 to 4 bullet points.\n"
+            "- Evidence: 3 to 4 bullet points.\n"
+            "- Context: exactly 1 short paragraph, at most 2 sentences.\n"
+            "- Do not add any other sections.\n"
+            "- Prefer cautious comparison wording unless the grounded interpretation is explicit.\n"
+            "- Do not use causal language unless the grounded interpretation or evidence explicitly states it.\n"
             "Base it strictly on the grounded interpretation and extracted evidence below.\n\n"
             f"GROUNDED INTERPRETATION:\n{json.dumps(grounded, ensure_ascii=False, indent=2)}\n\n"
             f"EXTRACTED EVIDENCE:\n{json.dumps(analysis_payload, ensure_ascii=False, indent=2)}"
