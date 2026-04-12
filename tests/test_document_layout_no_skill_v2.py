@@ -17,6 +17,15 @@ def _module(name: str, **attrs: object) -> types.ModuleType:
 @pytest.fixture
 def service_module(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(sys.modules, "azure", _module("azure"))
+    monkeypatch.setitem(sys.modules, "azure.core", _module("azure.core"))
+    monkeypatch.setitem(
+        sys.modules,
+        "azure.core.exceptions",
+        _module(
+            "azure.core.exceptions",
+            HttpResponseError=type("HttpResponseError", (Exception,), {}),
+        ),
+    )
     monkeypatch.setitem(sys.modules, "azure.ai", _module("azure.ai"))
     monkeypatch.setitem(
         sys.modules,
@@ -31,6 +40,9 @@ def service_module(monkeypatch: pytest.MonkeyPatch):
             DocumentContentFormat=type("DocumentContentFormat", (), {"TEXT": "text"}),
         ),
     )
+    monkeypatch.setitem(sys.modules, "src", _module("src"))
+    monkeypatch.setitem(sys.modules, "src.conf", _module("src.conf"))
+    monkeypatch.setitem(sys.modules, "src.services", _module("src.services"))
 
     monkeypatch.setitem(
         sys.modules,
@@ -51,6 +63,15 @@ def service_module(monkeypatch: pytest.MonkeyPatch):
         _module(
             "src.services.document_intelligence.service",
             DocumentIntelligenceService=type("DocumentIntelligenceService", (), {}),
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "src.services.openai",
+        _module(
+            "src.services.openai",
+            OpenAIService=type("OpenAIService", (), {}),
+            OpenAIServiceError=type("OpenAIServiceError", (Exception,), {}),
         ),
     )
     monkeypatch.setitem(

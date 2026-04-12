@@ -34,6 +34,7 @@ local_documents/*
 data/*
 .env
 logs/*
+reports/*
 
 index.html
 

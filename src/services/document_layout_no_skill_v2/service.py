@@ -1,5 +1,6 @@
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -29,6 +30,7 @@ DEFAULT_EMBEDDING_DIMENSIONS = 1536
 DEFAULT_TEXT_RECORD_CATEGORY = "document-layout-demo"
 DEFAULT_TEXT_RECORD_TOPIC = "layout extraction"
 DEFAULT_TEXT_RECORD_SUBTOPIC = "pdf text and figures"
+DEFAULT_SEMANTIC_DEVIATION_DIR = Path("local_documents/semantic_deviation_runs")
 VERTICAL_PROXIMITY_THRESHOLD = 0.35
 CAPTION_BAND_THRESHOLD = 0.12
 MIN_HORIZONTAL_OVERLAP = 0.2
@@ -1601,6 +1603,49 @@ class DocumentLayoutNoSkillV2Service:
         )
         return artifact_uri
 
+    def _write_semantic_deviation_artifact(
+        self,
+        *,
+        records: list[dict[str, Any]],
+    ) -> str:
+        generated_at = datetime.now(timezone.utc)
+        image_records = [
+            {
+                "record_id": str(record.get("id") or ""),
+                "source_name": str(
+                    (record.get("metadata") or {}).get("source_name") or ""
+                ),
+                "figure_id": str(
+                    ((record.get("metadata") or {}).get("image") or {}).get("figure_id")
+                    or ""
+                ),
+                "page_number": ((record.get("metadata") or {}).get("image") or {}).get(
+                    "page_number"
+                ),
+                "markdown": str(record.get("content") or ""),
+                "vector": record.get("contentVector") or [],
+            }
+            for record in records
+            if str((record.get("metadata") or {}).get("source_type") or "") == "image"
+        ]
+        payload = {
+            "pipeline": "document-layout-no-skill-v2",
+            "mode": "demo",
+            "generated_at": generated_at.isoformat(),
+            "record_count": len(image_records),
+            "records": image_records,
+        }
+        out_path = (
+            DEFAULT_SEMANTIC_DEVIATION_DIR
+            / f"semantic-run-{generated_at.strftime('%Y%m%dT%H%M%S%fZ')}.json"
+        )
+        self.local_output_store.save(payload, str(out_path))
+        self._log(
+            f"Persisted semantic deviation snapshot to '{out_path}' "
+            f"(image_records={len(image_records)})"
+        )
+        return str(out_path)
+
     def run(
         self,
         *,
@@ -1707,6 +1752,9 @@ class DocumentLayoutNoSkillV2Service:
         index_name = self._target_index_name(name_prefix)
         self._ensure_target_index(index_name=index_name, hard_refresh=hard_refresh)
         self._upload_records(index_name=index_name, records=all_records)
+        semantic_deviation_artifact = self._write_semantic_deviation_artifact(
+            records=all_records
+        )
         self._log(
             f"Demo finished with {len(all_records)} indexed record(s) "
             f"and {len(all_support_artifacts)} support artifact(s)"
@@ -1723,6 +1771,7 @@ class DocumentLayoutNoSkillV2Service:
             "support_artifact_count": len(all_support_artifacts),
             "derived_artifacts": derived_artifacts,
             "support_artifacts": all_support_artifacts,
+            "semantic_deviation_artifact": semantic_deviation_artifact,
             "embedding": {
                 "mode": "azure_openai",
                 "deployment": self.embedding_deployment,
