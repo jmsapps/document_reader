@@ -17,6 +17,9 @@ from src.services.shared import (
     DEFAULT_CHUNK_CONTAINER,
     DEFAULT_TARGET_INDEX_NAME,
     build_shared_index,
+    chunk_markdown_deterministic,
+    chunk_text_deterministic,
+    strip_figure_blocks_from_markdown,
 )
 from src.services.storage_account import AzureStorageAccountService
 from src.storage import LocalOutputStore
@@ -31,6 +34,7 @@ DEFAULT_TEXT_RECORD_CATEGORY = "document-layout-demo"
 DEFAULT_TEXT_RECORD_TOPIC = "layout extraction"
 DEFAULT_TEXT_RECORD_SUBTOPIC = "pdf text and figures"
 DEFAULT_SEMANTIC_DEVIATION_DIR = Path("local_documents/semantic_deviation_runs")
+DEFAULT_CONTENT_FORMAT = "markdown"
 VERTICAL_PROXIMITY_THRESHOLD = 0.35
 CAPTION_BAND_THRESHOLD = 0.12
 MIN_HORIZONTAL_OVERLAP = 0.2
@@ -302,31 +306,43 @@ class DocumentLayoutNoSkillV2Service:
                 records.append(record)
         return records
 
-    @classmethod
-    def _chunk_text(
-        cls, text: str, *, chunk_size: int, chunk_overlap: int
-    ) -> list[str]:
-        normalized = cls._searchable_text(text)
-        if not normalized:
-            return []
+    @staticmethod
+    def _normalize_content_format(content_format: str | None) -> str:
+        normalized = (content_format or DEFAULT_CONTENT_FORMAT).strip().lower()
+        if normalized not in {"markdown", "text"}:
+            raise ValueError(
+                "Unsupported content_format for layout-no-skill-v2. Use 'markdown' or 'text'."
+            )
+        return normalized
 
-        size = max(100, int(chunk_size))
-        overlap = max(0, min(int(chunk_overlap), size // 2))
-        start = 0
-        chunks: list[str] = []
-        while start < len(normalized):
-            end = min(len(normalized), start + size)
-            if end < len(normalized):
-                split = normalized.rfind(" ", start, end)
-                if split > start + 40:
-                    end = split
-            chunk = normalized[start:end].strip()
-            if chunk:
-                chunks.append(chunk)
-            if end >= len(normalized):
-                break
-            start = max(end - overlap, start + 1)
-        return chunks
+    @classmethod
+    def _di_content_format(cls, content_format: str) -> DocumentContentFormat:
+        normalized = cls._normalize_content_format(content_format)
+        if normalized == "markdown":
+            return DocumentContentFormat.MARKDOWN
+        return DocumentContentFormat.TEXT
+
+    @classmethod
+    def _chunk_document_text(
+        cls,
+        text: str,
+        *,
+        content_format: str,
+        chunk_size: int,
+        chunk_overlap: int,
+    ) -> list[str]:
+        normalized_format = cls._normalize_content_format(content_format)
+        if normalized_format == "markdown":
+            return chunk_markdown_deterministic(
+                text,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+            )
+        return chunk_text_deterministic(
+            text,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
 
     @staticmethod
     def _make_record_id(source_name: str, record_kind: str, ordinal: int) -> str:
@@ -1296,12 +1312,14 @@ class DocumentLayoutNoSkillV2Service:
         path: Path,
         chunk_size: int,
         chunk_overlap: int,
+        content_format: str = DEFAULT_CONTENT_FORMAT,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         payload = json.loads(path.read_text(encoding="utf-8"))
         source_name = path.stem
         metadata = self._metadata_from_payload(payload, source_name)
-        chunks = self._chunk_text(
+        chunks = self._chunk_document_text(
             str(payload.get("content") or payload.get("fulltext") or ""),
+            content_format=content_format,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
         )
@@ -1326,12 +1344,14 @@ class DocumentLayoutNoSkillV2Service:
         chunk_container: str,
         chunk_size: int,
         chunk_overlap: int,
+        content_format: str = DEFAULT_CONTENT_FORMAT,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        normalized_content_format = self._normalize_content_format(content_format)
         self._log(f"Analyzing PDF source '{path.name}' with Document Intelligence")
         result, operation_id = self.di_service.analyze_file_with_figures(
             path=path,
             model_id="prebuilt-layout",
-            content_format=DocumentContentFormat.TEXT,
+            content_format=self._di_content_format(normalized_content_format),
         )
         source_name = path.stem
         source_url = self._pdf_source_url(chunk_container=chunk_container, path=path)
@@ -1346,6 +1366,12 @@ class DocumentLayoutNoSkillV2Service:
             summary_method="document_text",
         )
         page_dimensions = self._page_dimensions_map(result)
+        document_text_content = str(getattr(result, "content", "") or "")
+        sanitized_document_text_content = (
+            strip_figure_blocks_from_markdown(document_text_content)
+            if normalized_content_format == "markdown"
+            else document_text_content
+        )
 
         page_text: dict[int, list[str]] = {}
         page_paragraphs: dict[int, list[dict[str, Any]]] = {}
@@ -1373,38 +1399,35 @@ class DocumentLayoutNoSkillV2Service:
 
         document_summary = self._generate_document_summary(
             source_name=path.name,
-            document_text=" ".join(full_document_parts),
+            document_text=sanitized_document_text_content
+            or " ".join(full_document_parts),
         )
 
         records: list[dict[str, Any]] = []
         support_artifacts: list[dict[str, Any]] = []
         ordinal = 1
         text_chunk_count = 0
-        for page_number in sorted(page_text):
-            page_content = " ".join(page_text[page_number])
-            for chunk in self._chunk_text(
-                page_content,
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-            ):
-                content = f"Page {page_number}: {chunk}"
-                records.append(
-                    {
-                        "id": self._make_record_id(source_name, "text", ordinal),
-                        "metadata": {
-                            **base_metadata,
-                            "image": self._image_metadata_record(
-                                page_number=page_number
-                            ),
-                        },
-                        "content": content,
-                        "contentVector": self._embed_text(content),
-                    }
-                )
-                ordinal += 1
-                text_chunk_count += 1
+        for chunk in self._chunk_document_text(
+            sanitized_document_text_content
+            or "\n\n".join(" ".join(page_text[p]) for p in sorted(page_text)),
+            content_format=normalized_content_format,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        ):
+            content = chunk.strip()
+            records.append(
+                {
+                    "id": self._make_record_id(source_name, "text", ordinal),
+                    "metadata": base_metadata,
+                    "content": content,
+                    "contentVector": self._embed_text(content),
+                }
+            )
+            ordinal += 1
+            text_chunk_count += 1
         self._log(
-            f"Derived {text_chunk_count} text chunk record(s) from PDF source '{path.name}'"
+            f"Derived {text_chunk_count} text chunk record(s) from PDF source '{path.name}' "
+            f"(content_format='{normalized_content_format}')"
         )
 
         figures = getattr(result, "figures", None) or []
@@ -1560,6 +1583,7 @@ class DocumentLayoutNoSkillV2Service:
         chunk_container: str,
         chunk_size: int,
         chunk_overlap: int,
+        content_format: str = DEFAULT_CONTENT_FORMAT,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         suffix = path.suffix.lower()
         self._log(f"Processing source '{path.name}' as '{suffix}'")
@@ -1568,6 +1592,7 @@ class DocumentLayoutNoSkillV2Service:
                 path=path,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
+                content_format=content_format,
             )
         if suffix == ".pdf":
             return self._pdf_records(
@@ -1575,6 +1600,7 @@ class DocumentLayoutNoSkillV2Service:
                 chunk_container=chunk_container,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
+                content_format=content_format,
             )
         raise ValueError(f"Unsupported demo file type: {path.suffix}")
 
@@ -1654,6 +1680,7 @@ class DocumentLayoutNoSkillV2Service:
         name_prefix: str = DEFAULT_NAME_PREFIX,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
+        content_format: str = DEFAULT_CONTENT_FORMAT,
         hard_refresh: bool = False,
     ) -> dict[str, Any]:
         path = Path(src)
@@ -1661,7 +1688,8 @@ class DocumentLayoutNoSkillV2Service:
             raise FileNotFoundError(f"File not found: {path}")
         self._log(
             f"Starting single-source v2 run for '{path}' "
-            f"(chunk_container='{chunk_container}', chunk_size={chunk_size}, chunk_overlap={chunk_overlap})"
+            f"(chunk_container='{chunk_container}', chunk_size={chunk_size}, "
+            f"chunk_overlap={chunk_overlap}, content_format='{self._normalize_content_format(content_format)}')"
         )
 
         records, support_artifacts = self._process_source(
@@ -1669,6 +1697,7 @@ class DocumentLayoutNoSkillV2Service:
             chunk_container=chunk_container,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
+            content_format=content_format,
         )
         artifact_uri = self._write_source_artifact(
             container_name=chunk_container,
@@ -1694,6 +1723,7 @@ class DocumentLayoutNoSkillV2Service:
             "support_artifacts": support_artifacts,
             "target_index": index_name,
             "record_count": len(records),
+            "content_format": self._normalize_content_format(content_format),
             "embedding": {
                 "mode": "azure_openai",
                 "deployment": self.embedding_deployment,
@@ -1711,6 +1741,7 @@ class DocumentLayoutNoSkillV2Service:
         name_prefix: str = DEFAULT_NAME_PREFIX,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
+        content_format: str = DEFAULT_CONTENT_FORMAT,
         hard_refresh: bool = True,
     ) -> dict[str, Any]:
         demo_path = Path(demo_dir)
@@ -1722,7 +1753,8 @@ class DocumentLayoutNoSkillV2Service:
         self._log(
             f"Starting v2 demo run from '{demo_path}' "
             f"(source_count={len(files)}, chunk_container='{chunk_container}', "
-            f"chunk_size={chunk_size}, chunk_overlap={chunk_overlap})"
+            f"chunk_size={chunk_size}, chunk_overlap={chunk_overlap}, "
+            f"content_format='{self._normalize_content_format(content_format)}')"
         )
         for path in files:
             self._log(f"Deriving v2 records for '{path.name}'")
@@ -1731,6 +1763,7 @@ class DocumentLayoutNoSkillV2Service:
                 chunk_container=chunk_container,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
+                content_format=content_format,
             )
             artifact_uri = self._write_source_artifact(
                 container_name=chunk_container,
@@ -1772,6 +1805,7 @@ class DocumentLayoutNoSkillV2Service:
             "derived_artifacts": derived_artifacts,
             "support_artifacts": all_support_artifacts,
             "semantic_deviation_artifact": semantic_deviation_artifact,
+            "content_format": self._normalize_content_format(content_format),
             "embedding": {
                 "mode": "azure_openai",
                 "deployment": self.embedding_deployment,

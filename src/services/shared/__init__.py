@@ -8,6 +8,11 @@ from .index_schema import (
     VECTOR_PROFILE_NAME,
     build_shared_index,
 )
+from .text_processing import (
+    chunk_markdown_deterministic,
+    chunk_text_deterministic,
+    strip_figure_blocks_from_markdown,
+)
 
 __all__ = [
     "DEFAULT_CHUNK_CONTAINER",
@@ -18,4 +23,7 @@ __all__ = [
     "VECTOR_ALGORITHM_NAME",
     "VECTOR_PROFILE_NAME",
     "build_shared_index",
+    "chunk_markdown_deterministic",
+    "chunk_text_deterministic",
+    "strip_figure_blocks_from_markdown",
 ]

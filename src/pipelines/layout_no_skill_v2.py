@@ -15,6 +15,7 @@ class LayoutNoSkillV2Pipeline:
                 name_prefix=options.name_prefix,
                 chunk_size=options.chunk_size,
                 chunk_overlap=options.chunk_overlap,
+                content_format=options.content_format,
                 hard_refresh=options.hard_refresh,
             )
 
@@ -25,6 +26,7 @@ class LayoutNoSkillV2Pipeline:
                 name_prefix=options.name_prefix,
                 chunk_size=options.chunk_size,
                 chunk_overlap=options.chunk_overlap,
+                content_format=options.content_format,
                 hard_refresh=options.hard_refresh,
             )
 

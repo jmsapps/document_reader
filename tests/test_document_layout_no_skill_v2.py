@@ -37,7 +37,11 @@ def service_module(monkeypatch: pytest.MonkeyPatch):
         "azure.ai.documentintelligence.models",
         _module(
             "azure.ai.documentintelligence.models",
-            DocumentContentFormat=type("DocumentContentFormat", (), {"TEXT": "text"}),
+            DocumentContentFormat=type(
+                "DocumentContentFormat",
+                (),
+                {"TEXT": "text", "MARKDOWN": "markdown"},
+            ),
         ),
     )
     monkeypatch.setitem(sys.modules, "src", _module("src"))
@@ -82,6 +86,9 @@ def service_module(monkeypatch: pytest.MonkeyPatch):
             DEFAULT_CHUNK_CONTAINER="chunk-container",
             DEFAULT_TARGET_INDEX_NAME="rag-index",
             build_shared_index=lambda *args, **kwargs: None,
+            chunk_markdown_deterministic=lambda text, **kwargs: [text] if text else [],
+            chunk_text_deterministic=lambda text, **kwargs: [text] if text else [],
+            strip_figure_blocks_from_markdown=lambda markdown: markdown,
         ),
     )
     monkeypatch.setitem(

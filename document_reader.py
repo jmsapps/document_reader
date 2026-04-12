@@ -192,6 +192,14 @@ def main() -> int:
             action="store_true",
             help="Run the selected no-skill demo over the files in the demo folder.",
         )
+        if pipeline_name == "layout-no-skill-v2":
+            parser.add_argument(
+                "--content-format",
+                "-f",
+                choices=["text", "markdown"],
+                default="markdown",
+                help="Document Intelligence content format for layout-no-skill-v2 text extraction and chunking. Default: markdown.",
+            )
     else:
         parser.add_argument(
             "--model",
@@ -250,6 +258,7 @@ def main() -> int:
                     name_prefix=args.name_prefix,
                     chunk_size=args.chunk_size,
                     chunk_overlap=args.chunk_overlap,
+                    content_format=args.content_format,
                     hard_refresh=args.hard_refresh,
                 )
             )

@@ -43,4 +43,5 @@ class LayoutNoSkillV2PipelineOptions:
     name_prefix: str
     chunk_size: int
     chunk_overlap: int
+    content_format: Literal["text", "markdown"]
     hard_refresh: bool
