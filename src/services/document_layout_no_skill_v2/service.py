@@ -33,7 +33,7 @@ DEFAULT_EMBEDDING_DIMENSIONS = 1536
 DEFAULT_TEXT_RECORD_CATEGORY = "document-layout-demo"
 DEFAULT_TEXT_RECORD_TOPIC = "layout extraction"
 DEFAULT_TEXT_RECORD_SUBTOPIC = "pdf text and figures"
-DEFAULT_SEMANTIC_DEVIATION_DIR = Path("local_documents/semantic_deviation_runs")
+DEFAULT_SEMANTIC_DEVIATION_DIR = Path("reports/semantic_deviation_runs")
 DEFAULT_CONTENT_FORMAT = "markdown"
 VERTICAL_PROXIMITY_THRESHOLD = 0.35
 CAPTION_BAND_THRESHOLD = 0.12
@@ -1320,6 +1320,7 @@ class DocumentLayoutNoSkillV2Service:
             f"GROUNDED INTERPRETATION:\n{json.dumps(grounded, ensure_ascii=False, indent=2)}\n\n"
             f"EXTRACTED EVIDENCE:\n{json.dumps(analysis_payload, ensure_ascii=False, indent=2)}"
         )
+
         try:
             markdown = self._responses_text(
                 deployment=self.verbalization_deployment,
@@ -1351,7 +1352,7 @@ class DocumentLayoutNoSkillV2Service:
         source_name = path.stem
         metadata = self._metadata_from_payload(payload, source_name)
         chunks = self._chunk_document_text(
-            str(payload.get("content") or payload.get("fulltext") or ""),
+            str(payload.get("content") or ""),
             content_format=content_format,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
